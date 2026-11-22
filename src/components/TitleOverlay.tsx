@@ -5,6 +5,7 @@ interface TitleOverlayProps {
   bestMach: number;
   muted: boolean;
   onStart: () => void;
+  onStartAutoplay: () => void;
   onToggleMute: () => void;
 }
 
@@ -13,6 +14,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
   bestMach,
   muted,
   onStart,
+  onStartAutoplay,
   onToggleMute,
 }) => {
   return (
@@ -93,8 +95,8 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
             </text>
           </svg>
 
-          {/* Primary Start CTA + optional quiet personal record */}
-          <div className="mt-6 flex flex-wrap items-center gap-5 pl-2">
+          {/* Primary Start CTA + One-Click Autoplay launch + optional personal record */}
+          <div className="mt-6 flex flex-wrap items-center gap-3.5 pl-2">
             <button
               type="button"
               data-start="true"
@@ -113,8 +115,24 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
               </svg>
             </button>
 
+            <button
+              type="button"
+              onClick={onStartAutoplay}
+              className="pointer-events-auto font-display inline-flex items-center gap-2.5 rounded-sm border border-[#7dd3fc]/45 bg-[#160805]/82 px-5 py-3.5 text-sm sm:text-base font-bold tracking-[0.14em] text-[#d8f5ff] uppercase shadow-[0_10px_24px_rgba(22,6,3,0.45)] transition-colors duration-150 hover:border-[#bae6fd]/80 hover:bg-[#1f110d]/92 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#7dd3fc] cursor-pointer whitespace-nowrap"
+            >
+              <svg viewBox="0 0 20 20" className="h-4 w-4 text-[#7dd3fc]" fill="none" aria-hidden="true">
+                <path
+                  d="M10 2.5 16.5 16l-6.5-3.2L3.5 16 10 2.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              <span>Autoplay</span>
+            </button>
+
             {bestScore > 0 && (
-              <div className="hud-text-shadow font-telemetry flex items-center gap-2.5 text-sm font-medium text-[#ffead8]">
+              <div className="hud-text-shadow font-telemetry flex items-center gap-2.5 pl-1 text-sm font-medium text-[#ffead8]">
                 <span>Best Mach {bestMach.toFixed(1)}</span>
                 <span aria-hidden="true" className="text-[#fb923c]">·</span>
                 <span>{bestScore.toLocaleString()} pts</span>

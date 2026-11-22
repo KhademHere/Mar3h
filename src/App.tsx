@@ -8,8 +8,8 @@ import type { FlightTelemetry, GamePhase, HudBannerEvent, RunSummary } from './g
 
 const INITIAL_TELEMETRY: FlightTelemetry = {
   mach: START_MACH,
-  speedMetersPerSec: 120,
-  altitude: 18,
+  speedMetersPerSec: 131,
+  altitude: 20,
   distance: 0,
   score: 0,
   bestScore: 0,
@@ -18,6 +18,7 @@ const INITIAL_TELEMETRY: FlightTelemetry = {
   boostCharge: 1,
   isBoosting: false,
   speedIntensity: 0,
+  autoplayActive: false,
 };
 
 export default function App() {
@@ -26,11 +27,14 @@ export default function App() {
   const engineRef = useRef<MarsFlightEngine | null>(null);
   const bannerTimerRef = useRef<number | null>(null);
   const flashTimerRef = useRef<number | null>(null);
+  const scrapeTimerRef = useRef<number | null>(null);
 
   const [phase, setPhase] = useState<GamePhase>('title');
   const [telemetry, setTelemetry] = useState<FlightTelemetry>(INITIAL_TELEMETRY);
   const [banner, setBanner] = useState<HudBannerEvent | null>(null);
   const [nearMissFlash, setNearMissFlash] = useState(false);
+  const [scrapeFlash, setScrapeFlash] = useState(false);
+  const [autoplayActive, setAutoplayActive] = useState(false);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [muted, setMuted] = useState(false);
 
@@ -52,6 +56,7 @@ export default function App() {
           if (nextPhase !== 'playing') {
             setBanner(null);
             setNearMissFlash(false);
+            setScrapeFlash(false);
           }
         },
         onTelemetry: (nextTelemetry) => {
@@ -71,6 +76,16 @@ export default function App() {
             setNearMissFlash(false);
           }, 260);
         },
+        onScrapeFlash: () => {
+          setScrapeFlash(true);
+          if (scrapeTimerRef.current !== null) window.clearTimeout(scrapeTimerRef.current);
+          scrapeTimerRef.current = window.setTimeout(() => {
+            setScrapeFlash(false);
+          }, 300);
+        },
+        onAutoplayChange: (active) => {
+          setAutoplayActive(active);
+        },
         onGameOver: (runSummary) => {
           setSummary(runSummary);
         },
@@ -86,13 +101,22 @@ export default function App() {
     return () => {
       if (bannerTimerRef.current !== null) window.clearTimeout(bannerTimerRef.current);
       if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+      if (scrapeTimerRef.current !== null) window.clearTimeout(scrapeTimerRef.current);
       engine.dispose();
       engineRef.current = null;
     };
   }, []);
 
   const handleStart = useCallback(() => {
-    engineRef.current?.startRun();
+    engineRef.current?.startRun(false);
+  }, []);
+
+  const handleStartAutoplay = useCallback(() => {
+    engineRef.current?.startRun(true);
+  }, []);
+
+  const handleToggleAutoplay = useCallback(() => {
+    engineRef.current?.toggleAutoplay();
   }, []);
 
   const handlePause = useCallback(() => {
@@ -128,9 +152,10 @@ export default function App() {
         className="fixed inset-0 z-0 h-full w-full"
       />
 
-      {/* Lightweight 2D overlay canvas for rushing white wind streaks & high-speed radial vignette */}
+      {/* 2D FX overlay canvas for Mach-reactive aircraft trails, rushing wind streaks, and radial vignette */}
       <canvas
         ref={fxCanvasRef}
+        data-testid="fx-trail-canvas"
         aria-hidden="true"
         className="pointer-events-none fixed inset-0 z-10 h-full w-full"
       />
@@ -141,6 +166,7 @@ export default function App() {
           bestMach={telemetry.bestMach}
           muted={muted}
           onStart={handleStart}
+          onStartAutoplay={handleStartAutoplay}
           onToggleMute={handleToggleMute}
         />
       )}
@@ -150,9 +176,12 @@ export default function App() {
           telemetry={telemetry}
           banner={banner}
           nearMissFlash={nearMissFlash}
+          scrapeFlash={scrapeFlash}
+          autoplayActive={autoplayActive}
           muted={muted}
           onPause={handlePause}
           onToggleMute={handleToggleMute}
+          onToggleAutoplay={handleToggleAutoplay}
           onBoostStart={handleBoostStart}
           onBoostEnd={handleBoostEnd}
         />

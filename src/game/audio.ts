@@ -241,6 +241,44 @@ export class FlightAudioEngine {
     osc.stop(now + 0.25);
   }
 
+  /** Forgiving rock/ramp graze warning spark crunch */
+  public playScrape(): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(2400, now);
+    bp.frequency.exponentialRampToValueAtTime(950, now + 0.18);
+    bp.Q.value = 2.4;
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.45, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+
+    src.connect(bp);
+    bp.connect(gain);
+    gain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.22);
+
+    const warnOsc = this.ctx.createOscillator();
+    warnOsc.type = 'sawtooth';
+    warnOsc.frequency.setValueAtTime(340, now);
+    warnOsc.frequency.exponentialRampToValueAtTime(190, now + 0.14);
+    const wg = this.ctx.createGain();
+    wg.gain.setValueAtTime(0.18, now);
+    wg.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    warnOsc.connect(wg);
+    wg.connect(this.masterGain);
+    warnOsc.start(now);
+    warnOsc.stop(now + 0.18);
+  }
+
   /** Heavy Martian rock impact explosion */
   public playCrash(): void {
     if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;

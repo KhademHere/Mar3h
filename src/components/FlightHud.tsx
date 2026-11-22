@@ -5,9 +5,12 @@ interface FlightHudProps {
   telemetry: FlightTelemetry;
   banner: HudBannerEvent | null;
   nearMissFlash: boolean;
+  scrapeFlash: boolean;
+  autoplayActive: boolean;
   muted: boolean;
   onPause: () => void;
   onToggleMute: () => void;
+  onToggleAutoplay: () => void;
   onBoostStart: () => void;
   onBoostEnd: () => void;
 }
@@ -16,9 +19,12 @@ export const FlightHud: React.FC<FlightHudProps> = ({
   telemetry,
   banner,
   nearMissFlash,
+  scrapeFlash,
+  autoplayActive,
   muted,
   onPause,
   onToggleMute,
+  onToggleAutoplay,
   onBoostStart,
   onBoostEnd,
 }) => {
@@ -38,9 +44,19 @@ export const FlightHud: React.FC<FlightHudProps> = ({
         }}
       />
 
-      {/* Top row: compact score cluster on left, Mute & Pause icon buttons on right */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="rounded-sm border border-[#ffd8bc]/20 bg-[#1a0905]/72 px-4 py-2.5 shadow-[0_6px_18px_rgba(15,5,2,0.45)]">
+      {/* Forgiving orange-red spark edge warning flash on slight ramp/rock graze */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0 transition-opacity duration-200"
+        style={{
+          opacity: scrapeFlash ? 1 : 0,
+          boxShadow: 'inset 0 0 110px rgba(249, 115, 22, 0.65), inset 0 0 36px rgba(239, 68, 68, 0.52)',
+        }}
+      />
+
+      {/* Top row: compact score cluster on left, Autoplay + Mute + Pause controls on right */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="rounded-sm border border-[#ffd8bc]/20 bg-[#1a0905]/74 px-4 py-2.5 shadow-[0_6px_18px_rgba(15,5,2,0.45)]">
           <div className="flex items-baseline gap-3">
             <span className="font-display text-[11px] font-semibold tracking-[0.16em] text-[#f9b184] uppercase">
               Score
@@ -65,8 +81,34 @@ export const FlightHud: React.FC<FlightHudProps> = ({
           </div>
         </div>
 
-        {/* Top-right compact utility square icon buttons */}
+        {/* Top-right controls: One-Click Autoplay toggle + Mute + Pause */}
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-pressed={autoplayActive}
+            data-testid="autoplay-toggle"
+            onClick={(e) => {
+              e.currentTarget.blur();
+              onToggleAutoplay();
+            }}
+            className={`pointer-events-auto font-display inline-flex h-11 items-center gap-2 rounded-sm border px-3.5 sm:px-4 text-xs sm:text-sm font-bold tracking-[0.14em] uppercase transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer whitespace-nowrap ${
+              autoplayActive
+                ? 'border-[#bae6fd] bg-[#0ea5e9] text-[#071520] shadow-[0_0_20px_rgba(56,189,248,0.48)]'
+                : 'border-[#7dd3fc]/40 bg-[#1a0905]/80 text-[#dcf5ff] hover:border-[#bae6fd]/70 hover:bg-[#2a120c]/90'
+            }`}
+          >
+            <svg viewBox="0 0 20 20" className="h-4 w-4 shrink-0" fill="none" aria-hidden="true">
+              <path
+                d="M10 2.5 16.5 16l-6.5-3.2L3.5 16 10 2.5Z"
+                stroke="currentColor"
+                strokeWidth="1.9"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span>Autoplay</span>
+          </button>
+
           <button
             type="button"
             tabIndex={-1}
@@ -129,7 +171,7 @@ export const FlightHud: React.FC<FlightHudProps> = ({
         </div>
       </div>
 
-      {/* Transient center-upper flight callout (Near Miss or Mach Shockwave) */}
+      {/* Transient center-upper flight callout (Near Miss, Mach Shockwave, or Hull Graze) */}
       <div className="pointer-events-none fixed inset-x-0 top-[15%] flex justify-center px-4">
         {banner && (
           <div
@@ -141,7 +183,9 @@ export const FlightHud: React.FC<FlightHudProps> = ({
               className={`font-display text-2xl sm:text-4xl font-bold italic tracking-[0.14em] uppercase ${
                 banner.kind === 'near-miss'
                   ? 'near-miss-glow text-[#fde047]'
-                  : 'shockwave-glow text-[#bae6fd]'
+                  : banner.kind === 'scrape'
+                    ? 'near-miss-glow text-[#fb923c]'
+                    : 'shockwave-glow text-[#bae6fd]'
               }`}
             >
               {banner.label}
@@ -153,19 +197,34 @@ export const FlightHud: React.FC<FlightHudProps> = ({
         )}
       </div>
 
-      {/* Bottom row: glowing Mach Speed Display + Afterburner gauge + Hold Boost button */}
+      {/* Bottom row: glowing Mach Speed Display (+ subtle glowing AUTOPLAY ON indicator) + Hold Boost button */}
       <div className="flex items-end justify-between gap-4">
         {/* Clean glowing Mach Flight Display */}
         <div
           className="rounded-sm border border-[#7dd3fc]/32 bg-[#160805]/82 px-4 py-3 sm:px-5 sm:py-3.5 shadow-[0_8px_24px_rgba(12,4,2,0.55)]"
-          style={{ minWidth: '224px' }}
+          style={{ minWidth: '228px' }}
         >
           <div className="flex items-center justify-between gap-3">
-            <span className="font-display text-[11px] font-bold tracking-[0.18em] text-[#7dd3fc] uppercase">
-              Airspeed
-            </span>
+            {autoplayActive ? (
+              <span
+                data-testid="autoplay-indicator"
+                className="mach-glow font-display text-[11px] font-bold tracking-[0.18em] text-[#7dd3fc] uppercase"
+              >
+                AUTOPLAY ON
+              </span>
+            ) : (
+              <span className="font-display text-[11px] font-bold tracking-[0.18em] text-[#7dd3fc] uppercase">
+                Airspeed
+              </span>
+            )}
             <span className="font-telemetry text-[11px] font-medium text-[#f8cbb0]/85">
-              {telemetry.isBoosting ? 'AFTERBURNER' : isExtremeMach ? 'HYPERSONIC' : isHighMach ? 'SUPERCRUISE' : 'SUPERSONIC'}
+              {telemetry.isBoosting
+                ? 'AFTERBURNER'
+                : isExtremeMach
+                  ? 'HYPERSONIC'
+                  : isHighMach
+                    ? 'SUPERCRUISE'
+                    : 'SUPERSONIC'}
             </span>
           </div>
 

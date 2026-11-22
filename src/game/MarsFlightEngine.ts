@@ -16,6 +16,7 @@ import type { ControlInput, FlightTelemetry, GamePhase, HudBannerEvent, RunSumma
 
 const STORAGE_BEST_SCORE = 'ares_mach_best_score_v1';
 const STORAGE_BEST_MACH = 'ares_mach_best_mach_v1';
+const FX_TRAIL_CAPACITY = 54;
 
 interface WindStreak {
   angle: number;
@@ -25,6 +26,13 @@ interface WindStreak {
   alpha: number;
 }
 
+interface FxTrailSample {
+  left: THREE.Vector3;
+  right: THREE.Vector3;
+  center: THREE.Vector3;
+  valid: boolean;
+}
+
 export interface MarsFlightCallbacks {
   onPhaseChange: (phase: GamePhase) => void;
   onTelemetry: (telemetry: FlightTelemetry) => void;
@@ -32,12 +40,15 @@ export interface MarsFlightCallbacks {
   onGameOver: (summary: RunSummary) => void;
   onMuteChange: (muted: boolean) => void;
   onNearMissFlash: () => void;
+  onScrapeFlash: () => void;
+  onAutoplayChange: (active: boolean) => void;
 }
 
 /**
  * Self-contained Three.js supersonic Mars canyon flight engine.
- * Owns WebGLRenderer, software-WebGL pacing, 2D rushing wind streaks/motion blur overlay,
- * unified keyboard/mouse/touch controls, procedural audio, and throttled React telemetry hooks.
+ * Owns WebGLRenderer, software-WebGL pacing, 2D fxCanvas Mach-reactive aircraft trails +
+ * rushing wind streaks, unified keyboard/mouse/touch controls, one-click Autoplay mode,
+ * procedural audio, and throttled React telemetry hooks.
  */
 export class MarsFlightEngine {
   private readonly mountEl: HTMLDivElement;
@@ -57,8 +68,9 @@ export class MarsFlightEngine {
 
   private phase: GamePhase = 'title';
   private flight: FlightState = createInitialFlightState();
+  private autoplayActive = false;
   private bestScore = 0;
-  private bestMach = 1.15;
+  private bestMach = 1.25;
 
   private frameId = 0;
   private disposed = false;
@@ -82,14 +94,25 @@ export class MarsFlightEngine {
   private touchOriginY = 0;
   private uiBoostHeld = false;
 
-  // Pre-allocated math helpers for zero-GC render loop
+  // Pre-allocated math helpers for zero-GC render loop & 3D->2D fxCanvas trail projection
   private readonly _craftPos = new THREE.Vector3();
   private readonly _craftEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private readonly _craftQuat = new THREE.Quaternion();
   private readonly _camTargetPos = new THREE.Vector3();
   private readonly _camLookAt = new THREE.Vector3();
-  private readonly _curCamLook = new THREE.Vector3(0, 18, -40);
+  private readonly _curCamLook = new THREE.Vector3(0, 20, -40);
   private readonly _controlInput: ControlInput = { steerX: 0, steerY: 0, boost: false };
+
+  private readonly _leftEmitterLocal = new THREE.Vector3(-3.55, 0.02, 2.15);
+  private readonly _rightEmitterLocal = new THREE.Vector3(3.55, 0.02, 2.15);
+  private readonly _centerEmitterLocal = new THREE.Vector3(0, -0.02, 3.1);
+  private readonly _projScratch = new THREE.Vector3();
+  private readonly _trailRing: FxTrailSample[] = [];
+  private trailHead = 0;
+  private trailCount = 0;
+  private readonly _projX = new Float32Array(FX_TRAIL_CAPACITY);
+  private readonly _projY = new Float32Array(FX_TRAIL_CAPACITY);
+  private readonly _projValid = new Uint8Array(FX_TRAIL_CAPACITY);
 
   // Speed-line particles for the 2D rushing wind streak & subtle motion-blur canvas
   private readonly windStreaks: WindStreak[] = [];
@@ -109,6 +132,16 @@ export class MarsFlightEngine {
     this.callbacks = callbacks;
 
     this.loadSavedRecords();
+
+    // Pre-allocate ring buffer for Mach-reactive 2D fxCanvas aircraft trails
+    for (let i = 0; i < FX_TRAIL_CAPACITY; i++) {
+      this._trailRing.push({
+        left: new THREE.Vector3(),
+        right: new THREE.Vector3(),
+        center: new THREE.Vector3(),
+        valid: false,
+      });
+    }
 
     // Detect software WebGL (SwiftShader/llvmpipe/WARP) from GPU renderer string
     this.isSoftwareGl = (() => {
@@ -142,7 +175,7 @@ export class MarsFlightEngine {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(HORIZON_FOG_COLOR);
-    this.scene.fog = new THREE.FogExp2(HORIZON_FOG_COLOR, 0.00185);
+    this.scene.fog = new THREE.FogExp2(HORIZON_FOG_COLOR, 0.0017);
 
     // Mandatory studio environment reflection map on every device
     const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -150,8 +183,8 @@ export class MarsFlightEngine {
     pmremGenerator.dispose();
 
     // Camera
-    this.camera = new THREE.PerspectiveCamera(64, 16 / 9, 0.4, 1200);
-    this.camera.position.set(4.5, 22.5, 13.8);
+    this.camera = new THREE.PerspectiveCamera(64, 16 / 9, 0.4, 1300);
+    this.camera.position.set(4.5, 24.5, 13.8);
 
     // Warm/cool Martian atmospheric lighting rig with dramatic raking shadows
     this.sunLight = new THREE.DirectionalLight(0xffbe7d, 2.25);
@@ -160,7 +193,7 @@ export class MarsFlightEngine {
     this.sunLight.shadow.mapSize.set(1024, 1024);
     this.sunLight.shadow.camera.near = 20;
     this.sunLight.shadow.camera.far = 420;
-    const d = 105;
+    const d = 115;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
@@ -210,11 +243,12 @@ export class MarsFlightEngine {
 
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
+    this.resetFxTrails();
     this.world.update(0.016, this.flight.x, this.flight.y, this.flight.z);
     this.updateSunShadowRig();
 
     if (initialAutostart) {
-      this.startRun();
+      this.startRun(false);
     } else {
       this.setPhase('title');
       this.camera.position.set(this.flight.x + 4.2, this.flight.y + 4.4, this.flight.z + 13.6);
@@ -231,7 +265,7 @@ export class MarsFlightEngine {
       const savedScore = Number(window.localStorage.getItem(STORAGE_BEST_SCORE));
       const savedMach = Number(window.localStorage.getItem(STORAGE_BEST_MACH));
       if (Number.isFinite(savedScore) && savedScore > 0) this.bestScore = savedScore;
-      if (Number.isFinite(savedMach) && savedMach > 1.15) this.bestMach = savedMach;
+      if (Number.isFinite(savedMach) && savedMach > 1.25) this.bestMach = savedMach;
     } catch {
       // Ignore storage failures
     }
@@ -253,7 +287,50 @@ export class MarsFlightEngine {
     this.audio.setEngineActive(phase === 'playing');
   }
 
-  public startRun(): void {
+  private resetFxTrails(): void {
+    this.trailHead = 0;
+    this.trailCount = 0;
+    for (let i = 0; i < FX_TRAIL_CAPACITY; i++) {
+      this._trailRing[i].valid = false;
+    }
+  }
+
+  private pushFxTrailSample(): void {
+    const slot = this._trailRing[this.trailHead];
+    slot.left.copy(this._leftEmitterLocal).applyQuaternion(this._craftQuat).add(this._craftPos);
+    slot.right.copy(this._rightEmitterLocal).applyQuaternion(this._craftQuat).add(this._craftPos);
+    slot.center.copy(this._centerEmitterLocal).applyQuaternion(this._craftQuat).add(this._craftPos);
+    slot.valid = true;
+
+    this.trailHead = (this.trailHead + 1) % FX_TRAIL_CAPACITY;
+    if (this.trailCount < FX_TRAIL_CAPACITY) {
+      this.trailCount += 1;
+    }
+  }
+
+  public setAutoplay(active: boolean): void {
+    this.autoplayActive = active;
+    if (!active) {
+      // Seamless handoff back to player steering without stale pointer offsets
+      this.pointerSteerX = 0;
+      this.pointerSteerY = 0;
+    }
+    this.callbacks.onAutoplayChange(active);
+    this.emitTelemetryNow();
+  }
+
+  public toggleAutoplay(): boolean {
+    this.audio.unlock();
+    const next = !this.autoplayActive;
+    if (this.phase === 'title' && next) {
+      this.startRun(true);
+      return true;
+    }
+    this.setAutoplay(next);
+    return next;
+  }
+
+  public startRun(withAutoplay?: boolean): void {
     this.audio.unlock();
     this.keysHeld.clear();
     this.uiBoostHeld = false;
@@ -267,11 +344,17 @@ export class MarsFlightEngine {
     this.nearMissFovKick = 0;
     this.shockwaveFovKick = 0;
 
+    if (typeof withAutoplay === 'boolean') {
+      this.autoplayActive = withAutoplay;
+      this.callbacks.onAutoplayChange(this.autoplayActive);
+    }
+
     this.flight = createInitialFlightState();
     this.world.reset();
     this.spacecraft.setVisible(true);
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
+    this.resetFxTrails();
 
     // Snap chase camera cleanly right behind the craft for immediate zero-disorientation launch
     this.camera.position.set(this.flight.x, this.flight.y + 4.4, this.flight.z + 12.8);
@@ -311,11 +394,14 @@ export class MarsFlightEngine {
     this.keysHeld.clear();
     this.uiBoostHeld = false;
     this.crashDelayTimer = 0;
+    this.autoplayActive = false;
+    this.callbacks.onAutoplayChange(false);
     this.flight = createInitialFlightState();
     this.world.reset();
     this.spacecraft.setVisible(true);
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
+    this.resetFxTrails();
     this.setPhase('title');
   }
 
@@ -334,7 +420,6 @@ export class MarsFlightEngine {
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     const code = e.code;
 
-    // Prevent browser scrolling on game keys
     if (
       code === 'Space' ||
       code === 'ArrowUp' ||
@@ -352,14 +437,14 @@ export class MarsFlightEngine {
 
     if (this.phase === 'title') {
       if ((code === 'Enter' || code === 'Space') && !e.repeat) {
-        this.startRun();
+        this.startRun(false);
       }
       return;
     }
 
     if (this.phase === 'gameover') {
       if ((code === 'Enter' || code === 'Space' || code === 'KeyR') && !e.repeat) {
-        this.startRun();
+        this.startRun(false);
       }
       return;
     }
@@ -373,7 +458,7 @@ export class MarsFlightEngine {
     }
 
     if (code === 'KeyR' && !e.repeat && (this.phase === 'playing' || this.phase === 'paused')) {
-      this.startRun();
+      this.startRun(this.autoplayActive);
       return;
     }
 
@@ -398,14 +483,13 @@ export class MarsFlightEngine {
   };
 
   private readonly onMouseMove = (e: MouseEvent): void => {
-    if (this.phase !== 'playing' || this.touchActive) return;
+    if (this.phase !== 'playing' || this.touchActive || this.autoplayActive) return;
     const rect = this.mountEl.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
 
-    const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1; // -1..1
-    const ny = -(((e.clientY - rect.top) / rect.height) * 2 - 1); // +1 up, -1 down
+    const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ny = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
 
-    // Smooth deadzone in the center so tiny cursor drift feels calm
     const applyDeadzone = (v: number) => {
       const abs = Math.abs(v);
       if (abs < 0.08) return 0;
@@ -418,7 +502,7 @@ export class MarsFlightEngine {
   };
 
   private readonly onTouchStart = (e: TouchEvent): void => {
-    if (this.phase !== 'playing') return;
+    if (this.phase !== 'playing' || this.autoplayActive) return;
     const target = e.target as HTMLElement | null;
     if (target && target.closest('button')) return;
     if (e.touches.length === 0) return;
@@ -431,7 +515,7 @@ export class MarsFlightEngine {
   };
 
   private readonly onTouchMove = (e: TouchEvent): void => {
-    if (!this.touchActive || this.phase !== 'playing' || e.touches.length === 0) return;
+    if (!this.touchActive || this.phase !== 'playing' || this.autoplayActive || e.touches.length === 0) return;
     const t = e.touches[0];
     const maxDrag = Math.max(55, Math.min(115, this.viewWidth * 0.16));
     const dx = (t.clientX - this.touchOriginX) / maxDrag;
@@ -529,9 +613,9 @@ export class MarsFlightEngine {
     this.spacecraft.group.quaternion.copy(this._craftQuat);
 
     // Subtle high-speed aerodynamic airframe rattle when pushing extreme Mach or afterburner
-    const speedExcess = Math.max(0, this.flight.mach - 1.55);
+    const speedExcess = Math.max(0, this.flight.mach - 1.65);
     const rattleAmp =
-      (speedExcess * 0.032 + (this.flight.isBoosting ? 0.038 : 0)) *
+      (speedExcess * 0.03 + (this.flight.isBoosting ? 0.036 : 0)) *
       (this.phase === 'playing' && !this.flight.crashed ? 1 : 0);
     if (rattleAmp > 0.002) {
       this.spacecraft.hullRoot.position.set(
@@ -552,11 +636,11 @@ export class MarsFlightEngine {
         this._craftPos,
         this._craftQuat,
       );
+      this.pushFxTrailSample();
     }
   }
 
   private updateSunShadowRig(): void {
-    // Keep directional sun light & shadow frustum locked smoothly around the spacecraft
     const targetX = this.flight.x;
     const targetZ = this.flight.z - 55;
     this.sunLight.target.position.set(targetX, 12, targetZ);
@@ -569,7 +653,6 @@ export class MarsFlightEngine {
 
   private updateCamera(dt: number): void {
     if (this.phase === 'title') {
-      // Atmospheric sweeping showcase camera gliding behind and slightly off-quarter of the jet
       this.titleOrbitClock += dt;
       const swayX = Math.sin(this.titleOrbitClock * 0.36) * 5.8;
       const swayY = 4.6 + Math.cos(this.titleOrbitClock * 0.28) * 1.4;
@@ -591,8 +674,8 @@ export class MarsFlightEngine {
 
     // Intense close-behind supersonic chase camera
     const boostPull = this.flight.isBoosting ? 1.85 : 0;
-    const desiredCamX = this.flight.x - this.flight.vx * 0.048;
-    const desiredCamY = Math.max(this.flight.y + 3.65 - this.flight.vy * 0.032, 4.5);
+    const desiredCamX = this.flight.x - this.flight.vx * 0.046;
+    const desiredCamY = Math.max(this.flight.y + 3.65 - this.flight.vy * 0.032, 4.8);
     const desiredCamZ = this.flight.z + 11.4 + boostPull;
 
     this.camera.position.x = damp(this.camera.position.x, desiredCamX, 11, dt);
@@ -609,7 +692,6 @@ export class MarsFlightEngine {
     this._curCamLook.z = this._camLookAt.z;
     this.camera.lookAt(this._curCamLook);
 
-    // Subtle chase camera roll into turns for thrilling visceral canyon carving
     const camRoll = this.flight.roll * 0.24;
 
     // Decaying trauma*trauma shake + extreme-Mach aerodynamic vibration
@@ -617,7 +699,7 @@ export class MarsFlightEngine {
     const shakeMag = this.cameraTrauma * this.cameraTrauma;
     const speedRattle =
       !this.flight.crashed
-        ? Math.max(0, this.flight.mach - 1.65) * 0.028 + (this.flight.isBoosting ? 0.042 : 0)
+        ? Math.max(0, this.flight.mach - 1.75) * 0.026 + (this.flight.isBoosting ? 0.04 : 0)
         : 0;
 
     if (shakeMag > 0.001 || speedRattle > 0.001) {
@@ -635,7 +717,7 @@ export class MarsFlightEngine {
     const targetFov = Math.min(
       92,
       62 +
-        Math.max(0, this.flight.mach - 1.0) * 7.2 +
+        Math.max(0, this.flight.mach - 1.0) * 7.0 +
         (this.flight.isBoosting ? 7.5 : 0) +
         this.nearMissFovKick +
         this.shockwaveFovKick,
@@ -648,8 +730,130 @@ export class MarsFlightEngine {
   }
 
   /**
-   * Draws rushing white wind streaks along the edges of the viewport and a subtle
-   * radial peripheral motion-blur vignette that intensifies as Mach increases.
+   * Projects a 3D trail ring buffer onto the 2D fxCanvas and draws glowing Mach-reactive
+   * paths whose length, width, opacity, and plasma color intensity scale smoothly with Mach speed.
+   */
+  private drawFxAircraftTrails(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    mach: number,
+    boosting: boolean,
+  ): void {
+    if (this.trailCount < 2) return;
+
+    // Ensure camera matrices reflect the latest frame transform before projecting 3D -> 2D
+    this.camera.updateMatrixWorld();
+
+    // Normalized Mach speed factor 0 (Mach 1.1) -> 1 (Mach 3.4+)
+    const machNorm = Math.max(0, Math.min(1, (mach - 1.1) / 2.3 + (boosting ? 0.25 : 0)));
+
+    // Trail length dynamically grows with Mach speed (from 14 samples up to full 54 samples!)
+    const desiredSegments = Math.max(
+      12,
+      Math.min(this.trailCount, Math.round(14 + machNorm * (FX_TRAIL_CAPACITY - 14))),
+    );
+
+    // Dynamic color palette shifting with Mach intensity:
+    // Low Mach -> cool sky cyan; Mid Mach -> electric bright cyan; High Mach / Boost -> superheated plasma violet-gold & white-hot core
+    const outerR = Math.round(56 + machNorm * 145 + (boosting ? 45 : 0));
+    const outerG = Math.round(196 + (1 - Math.abs(machNorm - 0.5) * 1.1) * 44);
+    const outerB = Math.round(255 - Math.max(0, machNorm - 0.65) * 95);
+
+    const coreR = Math.round(220 + machNorm * 35);
+    const coreG = Math.round(248 - Math.max(0, machNorm - 0.72) * 20);
+    const coreB = 255;
+
+    const baseOpacity = (0.34 + machNorm * 0.54) * (boosting ? 1.15 : 1.0);
+    const baseOuterWidth = (3.2 + machNorm * 6.8) * (boosting ? 1.25 : 1.0);
+    const baseCoreWidth = (1.1 + machNorm * 2.4) * (boosting ? 1.2 : 1.0);
+
+    const drawRibbon = (
+      channel: 'left' | 'right' | 'center',
+      widthScale: number,
+      alphaScale: number,
+    ) => {
+      let validCount = 0;
+      for (let step = 0; step < desiredSegments; step++) {
+        const ringIdx = (this.trailHead - 1 - step + FX_TRAIL_CAPACITY) % FX_TRAIL_CAPACITY;
+        const sample = this._trailRing[ringIdx];
+        if (!sample.valid) {
+          this._projValid[step] = 0;
+          continue;
+        }
+        const worldPt = sample[channel];
+        this._projScratch.copy(worldPt).project(this.camera);
+
+        // Guard against behind-camera NDC inversion
+        if (this._projScratch.z < -1 || this._projScratch.z > 1) {
+          this._projValid[step] = 0;
+          continue;
+        }
+
+        this._projX[step] = (this._projScratch.x * 0.5 + 0.5) * w;
+        this._projY[step] = (-this._projScratch.y * 0.5 + 0.5) * h;
+        this._projValid[step] = 1;
+        validCount++;
+      }
+
+      if (validCount < 2) return;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Draw tapered glowing segments from newest (near wingtip/nozzle) to oldest (trailing fade)
+      for (let step = 0; step < desiredSegments - 1; step++) {
+        if (!this._projValid[step] || !this._projValid[step + 1]) continue;
+
+        const x1 = this._projX[step];
+        const y1 = this._projY[step];
+        const x2 = this._projX[step + 1];
+        const y2 = this._projY[step + 1];
+
+        // Skip huge jump if a point wrapped offscreen near clip plane
+        const segLenSq = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
+        if (segLenSq > w * w * 0.35) continue;
+
+        const t = step / (desiredSegments - 1); // 0 at craft -> 1 at tail tip
+        const fade = Math.pow(1 - t, 1.65);
+
+        // Pass 1: Luminous Mach-colored plasma glow halo
+        const outerAlpha = Math.min(0.92, baseOpacity * alphaScale * fade * 0.62);
+        if (outerAlpha > 0.01) {
+          ctx.strokeStyle = `rgba(${outerR}, ${outerG}, ${outerB}, ${outerAlpha.toFixed(3)})`;
+          ctx.lineWidth = Math.max(0.6, baseOuterWidth * widthScale * (0.2 + 0.8 * fade));
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
+
+        // Pass 2: White-hot supersonic filament core
+        const coreAlpha = Math.min(0.95, baseOpacity * alphaScale * fade * 0.88);
+        if (coreAlpha > 0.015) {
+          ctx.strokeStyle = `rgba(${coreR}, ${coreG}, ${coreB}, ${coreAlpha.toFixed(3)})`;
+          ctx.lineWidth = Math.max(0.4, baseCoreWidth * widthScale * (0.18 + 0.82 * fade));
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.stroke();
+        }
+      }
+
+      ctx.restore();
+    };
+
+    // Draw port & starboard Mach wingtip trails + intense center thruster slipstream path
+    drawRibbon('left', 0.95, 0.95);
+    drawRibbon('right', 0.95, 0.95);
+    drawRibbon('center', boosting ? 1.55 : 1.15, boosting ? 0.95 : 0.68);
+  }
+
+  /**
+   * Renders Mach-reactive 2D aircraft contrail paths, rushing white wind streaks,
+   * and subtle high-speed peripheral radial motion-blur vignette onto fxCanvasRef.
    */
   private renderSpeedOverlay(dt: number): void {
     const ctx = this.fxCtx;
@@ -666,13 +870,16 @@ export class MarsFlightEngine {
     const mach = this.flight.mach;
     const boostExtra = this.flight.isBoosting ? 0.35 : 0;
     const rawIntensity = Math.max(0, Math.min(1, (mach - 1.0) / 2.2 + boostExtra));
-    const intensity = this.phase === 'title' ? rawIntensity * 0.42 : rawIntensity;
+    const intensity = this.phase === 'title' ? rawIntensity * 0.45 : rawIntensity;
+
+    // 1. Draw Mach-reactive luminous aircraft trails projected onto fxCanvasRef
+    this.drawFxAircraftTrails(ctx, w, h, mach, this.flight.isBoosting);
 
     const cx = w * 0.5;
     const cy = h * 0.48;
     const maxRadius = Math.hypot(cx, cy);
 
-    // 1. Subtle high-speed radial peripheral motion-blur edge vignette
+    // 2. Subtle high-speed radial peripheral motion-blur edge vignette
     if (intensity > 0.08) {
       const grad = ctx.createRadialGradient(
         cx,
@@ -689,7 +896,7 @@ export class MarsFlightEngine {
       ctx.fillRect(0, 0, w, h);
     }
 
-    // 2. Rushing white wind streaks along the screen periphery
+    // 3. Rushing white wind streaks along the screen periphery
     const activeCount = Math.floor(18 + intensity * (this.windStreaks.length - 18));
     const travelRate = 1.45 + mach * 0.85 + (this.flight.isBoosting ? 1.15 : 0);
 
@@ -702,7 +909,6 @@ export class MarsFlightEngine {
         s.angle = Math.random() * Math.PI * 2;
       }
 
-      // Keep center 55% of viewport completely crystal-clear
       const innerR = Math.max(0.46, s.dist - s.length * (0.65 + intensity * 0.95));
       const outerR = s.dist;
       if (outerR <= 0.48) continue;
@@ -746,6 +952,7 @@ export class MarsFlightEngine {
       boostCharge: this.flight.boostCharge,
       isBoosting: this.flight.isBoosting,
       speedIntensity: intensity,
+      autoplayActive: this.autoplayActive,
     });
   }
 
@@ -779,7 +986,6 @@ export class MarsFlightEngine {
     if (this.disposed) return;
 
     if (this.isSoftwareGl) {
-      // Wait for CPU WebGL draw completion, then pause 80ms so the main thread & browser never starve
       const gl = this.renderer.getContext() as WebGL2RenderingContext;
       const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
       gl.flush();
@@ -824,12 +1030,13 @@ export class MarsFlightEngine {
       this.updateCamera(dt);
       this.renderSpeedOverlay(dt);
     } else if (this.phase === 'playing') {
-      // Handle brief sim-level hitstop on heavy crash impact while camera shake & particles tick
       if (this.hitstopTimer > 0) {
         this.hitstopTimer = Math.max(0, this.hitstopTimer - dt);
       } else if (!this.flight.crashed) {
         const input = this.readControlInput();
-        const { state: nextFlight, events } = stepFlightSimulation(this.flight, input, dt);
+        const { state: nextFlight, events } = stepFlightSimulation(this.flight, input, dt, {
+          gameplayAutoplay: this.autoplayActive,
+        });
         this.flight = nextFlight;
 
         if (events.boostStarted) {
@@ -838,10 +1045,23 @@ export class MarsFlightEngine {
           this.shockwaveFovKick = Math.max(this.shockwaveFovKick, 4.5);
         }
 
+        if (events.scrape) {
+          this.audio.playScrape();
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.52);
+          this.world.spawnScrapeSparks(this.flight.x, this.flight.y, this.flight.z);
+          this.callbacks.onScrapeFlash();
+          this.callbacks.onBanner({
+            id: this.bannerSeq++,
+            kind: 'scrape',
+            label: 'HULL GRAZE',
+            sublabel: 'SHIELD DEFLECTED · PULL CLEAR',
+          });
+        }
+
         if (events.nearMiss) {
           this.audio.playNearMiss();
-          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.36);
-          this.nearMissFovKick = 6.2;
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.34);
+          this.nearMissFovKick = 6.0;
           this.world.spawnNearMissSparks(this.flight.x, this.flight.y, this.flight.z);
           this.callbacks.onNearMissFlash();
           this.callbacks.onBanner({
@@ -855,8 +1075,8 @@ export class MarsFlightEngine {
         if (events.milestoneMach !== null) {
           this.audio.playShockwave();
           this.spacecraft.triggerShockwave(1.15);
-          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.45);
-          this.shockwaveFovKick = 7.5;
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.42);
+          this.shockwaveFovKick = 7.2;
           this.callbacks.onBanner({
             id: this.bannerSeq++,
             kind: 'shockwave',
@@ -893,14 +1113,12 @@ export class MarsFlightEngine {
         this.audio.updateEngine(this.flight.mach, this.flight.isBoosting);
       }
 
-      // Throttle React HUD telemetry updates to ~15Hz (never 60Hz setState)
       this.telemetryAccum += dt;
       if (this.telemetryAccum >= 0.065) {
         this.telemetryAccum = 0;
         this.emitTelemetryNow();
       }
     } else if (this.phase === 'gameover') {
-      // Keep explosion particles gently settling behind the Game Over modal
       this.world.update(dt, this.flight.x, this.flight.y, this.flight.z);
       this.updateCamera(dt);
     }

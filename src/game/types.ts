@@ -42,6 +42,7 @@ export interface FlightTelemetry {
   isBoosting: boolean;
   /** 0..1 intensity of peripheral motion blur & wind streaks */
   speedIntensity: number;
+  autoplayActive: boolean;
 }
 
 export interface RunSummary {
@@ -58,7 +59,7 @@ export interface RunSummary {
 
 export interface HudBannerEvent {
   id: number;
-  kind: 'near-miss' | 'shockwave';
+  kind: 'near-miss' | 'shockwave' | 'scrape';
   label: string;
   sublabel: string;
 }

@@ -47,6 +47,7 @@ export interface MarsWorldRig {
   update: (dt: number, craftX: number, craftY: number, craftZ: number) => void;
   spawnCrashExplosion: (x: number, y: number, z: number) => void;
   spawnNearMissSparks: (x: number, y: number, z: number) => void;
+  spawnScrapeSparks: (x: number, y: number, z: number) => void;
   reset: () => void;
   dispose: () => void;
 }
@@ -591,6 +592,23 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
           28 + Math.random() * 32,
           0.26 + Math.random() * 0.28,
           0.35 + Math.random() * 0.55,
+          palette[i % palette.length],
+        );
+      }
+      if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+    },
+    spawnScrapeSparks: (x, y, z) => {
+      const palette = [0xfff4c2, 0xffa726, 0xff5722, 0xffd54f];
+      for (let i = 0; i < 24; i++) {
+        emitParticle(
+          x + (Math.random() - 0.5) * 4.5,
+          y + (Math.random() - 0.5) * 1.6,
+          z + 1.0,
+          (Math.random() - 0.5) * 34,
+          4 + Math.random() * 18,
+          22 + Math.random() * 38,
+          0.3 + Math.random() * 0.32,
+          0.42 + Math.random() * 0.65,
           palette[i % palette.length],
         );
       }

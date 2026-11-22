@@ -1,8 +1,8 @@
 import type { CanyonObstacle } from './types';
 
-export const CHUNK_LENGTH = 260;
-export const TERRAIN_WIDTH = 420;
-export const SAFE_START_DISTANCE = 480; // Straight, open canyon launch zone
+export const CHUNK_LENGTH = 340;
+export const TERRAIN_WIDTH = 520;
+export const SAFE_START_DISTANCE = 620; // Wide, gentle opening canyon runway
 
 /** Deterministic hash in [0, 1) */
 export function hash2D(ix: number, iz: number): number {
@@ -64,32 +64,34 @@ export function ridgedNoise2D(x: number, z: number): number {
 
 /**
  * Center X coordinate of the winding Martian canyon at world Z (flight moves toward -Z).
- * Kept straight for the first ~480m so the craft flies safely on launch with zero input.
+ * Uses broad, sweeping, enjoyable curves instead of sharp sudden turns.
  */
 export function getCanyonCenterX(z: number): number {
   const dist = Math.max(0, -z);
-  const ramp = smoothstep(SAFE_START_DISTANCE * 0.72, SAFE_START_DISTANCE * 1.65, dist);
+  const ramp = smoothstep(SAFE_START_DISTANCE * 0.78, SAFE_START_DISTANCE * 1.9, dist);
   const curve =
-    Math.sin(dist * 0.0021) * 44 +
-    Math.sin(dist * 0.0049 + 1.1) * 20 +
-    Math.cos(dist * 0.0011 - 0.5) * 26;
+    Math.sin(dist * 0.00125) * 46 +
+    Math.sin(dist * 0.0026 + 1.1) * 18 +
+    Math.cos(dist * 0.00072 - 0.4) * 24;
   return curve * ramp;
 }
 
-/** Half-width of the flyable canyon corridor at world Z */
+/**
+ * Generously wide flyable canyon ramp half-width at world Z.
+ * Starts at ~66m half-width (132m wide canyon!) and narrows very gently to ~52m (104m wide).
+ */
 export function getCanyonHalfWidth(z: number): number {
   const dist = Math.max(0, -z);
-  // Starts generous (~44m half-width => 88m canyon), gradually narrows toward ~31m
-  const difficultyTighten = Math.min(13, dist * 0.00055);
-  const organicBreath = Math.sin(dist * 0.0063 + 0.4) * 5.5;
-  return 44 - difficultyTighten + organicBreath;
+  const difficultyTighten = Math.min(14, dist * 0.00028);
+  const organicBreath = Math.sin(dist * 0.0042 + 0.4) * 4.5;
+  return 66 - difficultyTighten + organicBreath;
 }
 
-/** Gently rolling dusty valley floor elevation */
+/** Smoothly rolling dusty Martian canyon floor elevation */
 export function getValleyFloorHeight(x: number, z: number): number {
   const dist = Math.max(0, -z);
-  const dune = (fbm2D(x * 0.018, z * 0.018) - 0.5) * 4.2;
-  const swell = Math.sin(dist * 0.0042) * 2.2;
+  const dune = (fbm2D(x * 0.014, z * 0.014) - 0.5) * 3.0;
+  const swell = Math.sin(dist * 0.0032) * 1.8;
   return 1.5 + dune + swell;
 }
 
@@ -101,7 +103,7 @@ export function smoothstep(edge0: number, edge1: number, x: number): number {
 
 /**
  * Shared exact terrain height function at world (x, z).
- * Used identically by both the 3D terrain mesh and collision/near-miss checks.
+ * Wide flat-to-gently-sloped ramp in the center, rising into towering stratified Martian canyon cliffs.
  */
 export function getTerrainHeight(x: number, z: number): number {
   const centerX = getCanyonCenterX(z);
@@ -110,21 +112,20 @@ export function getTerrainHeight(x: number, z: number): number {
 
   const floorY = getValleyFloorHeight(x, z);
 
-  // Inner valley stays low and flyable
-  const wallT = smoothstep(halfWidth * 0.68, halfWidth * 1.42, dx);
+  // Generous wide canyon floor & smooth banked ramp apron before the steep cliffs rise
+  const wallT = smoothstep(halfWidth * 0.78, halfWidth * 1.48, dx);
   if (wallT <= 0.0001) {
     return floorY;
   }
 
-  // Dramatic canyon wall rise + terraced strata + jagged Martian mountain peaks
-  const outerT = smoothstep(halfWidth * 1.15, halfWidth * 2.6, dx);
-  const ridge = ridgedNoise2D(x * 0.012, z * 0.012);
-  const detail = fbm2D(x * 0.035, z * 0.035);
+  // Towering Martian cliff walls rising to 55-150m on both flanks
+  const outerT = smoothstep(halfWidth * 1.18, halfWidth * 2.55, dx);
+  const ridge = ridgedNoise2D(x * 0.011, z * 0.011);
+  const detail = fbm2D(x * 0.032, z * 0.032);
 
-  // Steep canyon cliffs rising to 50-145m
-  const rawCliff = wallT * (48 + ridge * 58) + outerT * (38 + ridge * 54) + detail * 10 * wallT;
+  const rawCliff = wallT * (52 + ridge * 58) + outerT * (40 + ridge * 54) + detail * 10 * wallT;
 
-  // Add realistic Martian sedimentary rock terracing on the steep walls
+  // Realistic sedimentary Martian rock terracing
   const terraceStep = 14;
   const terraced =
     Math.floor(rawCliff / terraceStep) * terraceStep +
@@ -136,17 +137,16 @@ export function getTerrainHeight(x: number, z: number): number {
 
 /**
  * Deterministic canyon landmarks & obstacles for chunk index k (chunk covers z in [-k*L, -(k+1)*L]).
- * Chunk 0 & 1 establish the dramatic opening vista with a grand rock arch you fly directly beneath.
+ * Generously spaced so players have wide sightlines and comfortable maneuvering corridors.
  */
 export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
   if (chunkIndex < 0) return [];
   const obstacles: CanyonObstacle[] = [];
   const zStart = -chunkIndex * CHUNK_LENGTH;
 
-  // Chunk 0: Iconic opening landmark — massive natural Martian rock arch framed dead ahead!
-  // Craft spawns at (0, 18, 0) and flies right under the arch (crown clearance 42m, span ±36m).
+  // Chunk 0: Iconic grand Martian rock arch framed dead ahead with wide open clearance
   if (chunkIndex === 0) {
-    const archZ = -215;
+    const archZ = -255;
     const cx = getCanyonCenterX(archZ);
     obstacles.push({
       id: `arch-0`,
@@ -154,63 +154,63 @@ export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
       x: cx,
       y: getValleyFloorHeight(cx, archZ) - 2,
       z: archZ,
-      radius: 35,
-      height: 44,
+      radius: 48,
+      height: 50,
       thickness: 8.5,
-      yaw: 0.08,
+      yaw: 0.05,
       tint: 0.45,
     });
     return obstacles;
   }
 
-  // Chunk 1: Safe opening canyon with flanking buttresses and a second grand arch
+  // Chunk 1: Wide scenic opening canyon with two distant flanking rock monoliths
   if (chunkIndex === 1) {
-    const z1 = zStart - 110;
+    const z1 = zStart - 135;
     const cx1 = getCanyonCenterX(z1);
     const hw1 = getCanyonHalfWidth(z1);
     obstacles.push({
       id: `spire-1-a`,
       kind: 'spire',
-      x: cx1 + hw1 * 0.56,
-      y: getValleyFloorHeight(cx1 + hw1 * 0.56, z1) - 3,
+      x: cx1 + hw1 * 0.62,
+      y: getValleyFloorHeight(cx1 + hw1 * 0.62, z1) - 3,
       z: z1,
       radius: 10.5,
-      height: 62,
+      height: 66,
       thickness: 10.5,
       yaw: 0.4,
-      tint: 0.3,
+      tint: 0.35,
     });
 
-    const z2 = zStart - 210;
+    const z2 = zStart - 275;
     const cx2 = getCanyonCenterX(z2);
     const hw2 = getCanyonHalfWidth(z2);
     obstacles.push({
       id: `spire-1-b`,
       kind: 'spire',
-      x: cx2 - hw2 * 0.54,
-      y: getValleyFloorHeight(cx2 - hw2 * 0.54, z2) - 3,
+      x: cx2 - hw2 * 0.62,
+      y: getValleyFloorHeight(cx2 - hw2 * 0.62, z2) - 3,
       z: z2,
       radius: 11,
-      height: 68,
+      height: 70,
       thickness: 11,
       yaw: 1.7,
-      tint: 0.7,
+      tint: 0.68,
     });
     return obstacles;
   }
 
-  // Subsequent chunks: smooth difficulty ramp of spires, towering rock arches, and wall buttresses
-  const difficulty = Math.min(1, (chunkIndex - 1) / 22);
+  // Very gradual difficulty ramp across 40+ chunks (~13+ km)
+  const difficulty = Math.min(1, (chunkIndex - 1) / 40);
   const seedBase = chunkIndex * 37.19;
 
-  // Every 2nd or 3rd chunk features a giant canyon rock arch
-  if (chunkIndex % 2 === 0 || hash1D(seedBase + 1) > 0.62) {
-    const archZ = zStart - (75 + hash1D(seedBase + 2) * 110);
+  // Every 2nd chunk features a wide, monumental natural rock arch to fly through
+  if (chunkIndex % 2 === 0) {
+    const archZ = zStart - (115 + hash1D(seedBase + 2) * 110);
     const cx = getCanyonCenterX(archZ);
     const hw = getCanyonHalfWidth(archZ);
-    const archSpan = Math.max(24, hw * (0.82 - difficulty * 0.14));
-    const archHeight = 32 + hash1D(seedBase + 3) * 15 - difficulty * 4;
-    const offset = (hash1D(seedBase + 4) - 0.5) * hw * 0.24;
+    const archSpan = Math.max(36, hw * (0.76 - difficulty * 0.1));
+    const archHeight = 40 + hash1D(seedBase + 3) * 14 - difficulty * 4;
+    const offset = (hash1D(seedBase + 4) - 0.5) * hw * 0.16;
     obstacles.push({
       id: `arch-${chunkIndex}`,
       kind: 'arch',
@@ -219,41 +219,42 @@ export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
       z: archZ,
       radius: archSpan,
       height: archHeight,
-      thickness: 7.5 + hash1D(seedBase + 5) * 3.5,
-      yaw: (hash1D(seedBase + 6) - 0.5) * 0.34,
+      thickness: 7.5 + hash1D(seedBase + 5) * 3.0,
+      yaw: (hash1D(seedBase + 6) - 0.5) * 0.24,
       tint: hash1D(seedBase + 7),
     });
   }
 
-  // Jagged rock spires rising out of the canyon floor (2 to 4 per chunk)
-  const spireCount = 2 + Math.floor(difficulty * 2.2);
+  // Farther-apart jagged rock spires (1 to 2 per 340m chunk, always leaving wide open lanes!)
+  const spireCount = difficulty > 0.55 ? 2 : 1 + (chunkIndex % 2);
   for (let i = 0; i < spireCount; i++) {
     const s = seedBase + 10 + i * 13.7;
-    const frac = (i + 0.35 + hash1D(s) * 0.35) / spireCount;
+    const frac = (i + 0.35 + hash1D(s) * 0.3) / spireCount;
     const sz = zStart - frac * CHUNK_LENGTH;
     const cx = getCanyonCenterX(sz);
     const hw = getCanyonHalfWidth(sz);
 
-    // Avoid spawning a spire dead-center on top of an arch's Z plane
+    // Keep plenty of breathing room around arches
     const tooCloseToArch = obstacles.some(
-      (o) => o.kind === 'arch' && Math.abs(o.z - sz) < 34,
+      (o) => o.kind === 'arch' && Math.abs(o.z - sz) < 75,
     );
     if (tooCloseToArch) continue;
 
-    // Distribute spires across left, right, and staggered inner-valley lanes while always keeping >= 22m clear pass
-    const lanePick = (chunkIndex + i) % 3;
+    // Place spires cleanly off-center or alternating sides so there's always a huge open flying corridor
+    const sidePick = (chunkIndex + i) % 3;
     let lateralNorm = 0;
-    if (lanePick === 0) {
-      lateralNorm = -0.58 + hash1D(s + 1) * 0.38;
-    } else if (lanePick === 1) {
-      lateralNorm = 0.2 + hash1D(s + 1) * 0.38;
+    if (sidePick === 0) {
+      lateralNorm = -0.58 + hash1D(s + 1) * 0.28;
+    } else if (sidePick === 1) {
+      lateralNorm = 0.3 + hash1D(s + 1) * 0.28;
     } else {
-      lateralNorm = (hash1D(s + 1) - 0.5) * 0.72;
+      // Occasional scenic valley-center spire only after chunk 4, with 40m+ room on BOTH sides
+      lateralNorm = chunkIndex >= 4 ? (hash1D(s + 1) - 0.5) * 0.36 : 0.52;
     }
 
     const sx = cx + lateralNorm * hw;
-    const radius = 7.5 + hash1D(s + 2) * 6.5;
-    const height = 42 + hash1D(s + 3) * 48;
+    const radius = 7.5 + hash1D(s + 2) * 5.2;
+    const height = 46 + hash1D(s + 3) * 44;
 
     obstacles.push({
       id: `spire-${chunkIndex}-${i}`,
@@ -269,24 +270,26 @@ export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
     });
   }
 
-  // Protruding canyon wall buttresses on alternating flanks
-  const buttressSide = chunkIndex % 2 === 0 ? -1 : 1;
-  const bz = zStart - (45 + hash1D(seedBase + 99) * 165);
-  const bcx = getCanyonCenterX(bz);
-  const bhw = getCanyonHalfWidth(bz);
-  const bx = bcx + buttressSide * (bhw * 0.78);
-  obstacles.push({
-    id: `buttress-${chunkIndex}`,
-    kind: 'buttress',
-    x: bx,
-    y: getValleyFloorHeight(bx, bz) - 4,
-    z: bz,
-    radius: 13 + hash1D(seedBase + 101) * 6,
-    height: 55 + hash1D(seedBase + 102) * 35,
-    thickness: 14,
-    yaw: hash1D(seedBase + 103) * Math.PI,
-    tint: hash1D(seedBase + 104),
-  });
+  // Scenic outer canyon wall buttress tucked near the wall edge (every other chunk)
+  if (chunkIndex % 2 === 1) {
+    const buttressSide = (chunkIndex >> 1) % 2 === 0 ? -1 : 1;
+    const bz = zStart - (70 + hash1D(seedBase + 99) * 190);
+    const bcx = getCanyonCenterX(bz);
+    const bhw = getCanyonHalfWidth(bz);
+    const bx = bcx + buttressSide * (bhw * 0.88);
+    obstacles.push({
+      id: `buttress-${chunkIndex}`,
+      kind: 'buttress',
+      x: bx,
+      y: getValleyFloorHeight(bx, bz) - 4,
+      z: bz,
+      radius: 13 + hash1D(seedBase + 101) * 5,
+      height: 58 + hash1D(seedBase + 102) * 32,
+      thickness: 14,
+      yaw: hash1D(seedBase + 103) * Math.PI,
+      tint: hash1D(seedBase + 104),
+    });
+  }
 
   return obstacles;
 }

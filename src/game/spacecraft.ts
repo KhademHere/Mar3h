@@ -55,7 +55,7 @@ class WingtipTrail {
     this.material = new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.68,
+      opacity: 0.24,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
