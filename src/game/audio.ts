@@ -241,6 +241,82 @@ export class FlightAudioEngine {
     osc.stop(now + 0.25);
   }
 
+  /** Crisp, ascending futuristic holographic chime layered cleanly over the jet engine */
+  public playSpeedGate(streak: number): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    // Gently climb harmonic pitch with consecutive gate streaks (capped cleanly)
+    const semitoneBoost = Math.min(10, Math.max(0, streak - 1));
+    const baseFreq = 587.33 * Math.pow(2, semitoneBoost / 12); // D5 climbing cleanly
+
+    const notes = [baseFreq, baseFreq * 1.25, baseFreq * 1.5];
+    notes.forEach((freq, idx) => {
+      if (!this.ctx || !this.masterGain) return;
+      const start = now + idx * 0.042;
+      const osc = this.ctx.createOscillator();
+      osc.type = idx === 2 ? 'sine' : 'triangle';
+      osc.frequency.setValueAtTime(freq, start);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.03, start + 0.18);
+
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.001, start);
+      g.gain.linearRampToValueAtTime(idx === 2 ? 0.2 : 0.16, start + 0.018);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.28);
+
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(start);
+      osc.stop(start + 0.3);
+    });
+  }
+
+  /** Subtle double-beep avionics alert when the Boost Bar drains to empty & enters overheat cooldown */
+  public playBoostOverheat(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    for (let i = 0; i < 2; i++) {
+      const start = now + i * 0.11;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(420 - i * 95, start);
+
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1100;
+
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.001, start);
+      g.gain.linearRampToValueAtTime(0.14, start + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.001, start + 0.085);
+
+      osc.connect(lp);
+      lp.connect(g);
+      g.connect(this.masterGain);
+      osc.start(start);
+      osc.stop(start + 0.095);
+    }
+  }
+
+  /** Subtle crisp tactile click when cycling camera views */
+  public playCameraSwitch(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(760, now);
+    osc.frequency.exponentialRampToValueAtTime(1120, now + 0.045);
+
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.11, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.055);
+
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.06);
+  }
+
   /** Forgiving rock/ramp graze warning spark crunch */
   public playScrape(): void {
     if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;

@@ -2,6 +2,8 @@ export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
 export type MartianZoneId = 'plains' | 'canyon' | 'colony' | 'volcanic';
 
+export type CameraViewMode = 'chase' | 'cockpit' | 'wing' | 'cinematic';
+
 export interface MartianZoneInfo {
   id: MartianZoneId;
   name: string;
@@ -44,6 +46,19 @@ export interface CanyonObstacle {
   driftPhase?: number;
 }
 
+export interface SpeedGate {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  /** Inner passable ring radius in meters */
+  radius: number;
+  /** 'flow' sits comfortably along the route; 'bonus' is tucked off-center / under arches / high-low for extra reward */
+  tier: 'flow' | 'bonus';
+  /** Subtle yaw alignment following the canyon curve */
+  yaw: number;
+}
+
 export interface ControlInput {
   /** -1 (left) to +1 (right) */
   steerX: number;
@@ -64,11 +79,20 @@ export interface FlightTelemetry {
   nearMissCount: number;
   boostCharge: number; // 0..1
   isBoosting: boolean;
+  boostOverheated: boolean;
   /** 0..1 intensity of peripheral motion blur & wind streaks */
   speedIntensity: number;
   autoplayActive: boolean;
   zoneId: MartianZoneId;
   zoneName: string;
+  /** Consecutive speed gates hit; displayed multiplier is gateMultiplier (x1, x2, x3...) */
+  gateStreak: number;
+  gateMultiplier: number;
+  gatesPassed: number;
+  cameraView: CameraViewMode;
+  /** Craft roll & pitch in radians for subtle live cockpit horizon line */
+  roll: number;
+  pitch: number;
 }
 
 export interface RunSummary {
@@ -78,6 +102,7 @@ export interface RunSummary {
   bestMach: number;
   distance: number;
   nearMissCount: number;
+  gatesPassed: number;
   survivalSeconds: number;
   isNewBestScore: boolean;
   isNewBestMach: boolean;
@@ -85,7 +110,7 @@ export interface RunSummary {
 
 export interface HudBannerEvent {
   id: number;
-  kind: 'near-miss' | 'shockwave' | 'scrape' | 'zone';
+  kind: 'near-miss' | 'shockwave' | 'scrape' | 'zone' | 'gate' | 'camera';
   label: string;
   sublabel: string;
 }

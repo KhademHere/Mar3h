@@ -18,6 +18,7 @@ export interface SpacecraftRig {
   triggerShockwave: (intensity?: number) => void;
   resetTrails: (worldPos: THREE.Vector3) => void;
   setVisible: (visible: boolean) => void;
+  setCockpitMode: (isCockpit: boolean) => void;
   dispose: () => void;
 }
 
@@ -152,10 +153,10 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   noseMesh.receiveShadow = true;
   hullRoot.add(noseMesh);
 
-  // 2. Dark carbon-ceramic thermal nose tip & pitot needle spike
-  const noseTipGeo = new THREE.ConeGeometry(0.16, 1.25, 16);
+  // 2. Dark carbon-ceramic thermal nose tip & pitot needle spike (open-ended so cockpit view never sees flat base cap)
+  const noseTipGeo = new THREE.ConeGeometry(0.145, 1.32, 16, 1, true);
   noseTipGeo.rotateX(-Math.PI / 2);
-  noseTipGeo.translate(0, 0, -5.05);
+  noseTipGeo.translate(0, 0, -5.08);
   disposables.push(noseTipGeo);
   const noseTipMesh = new THREE.Mesh(noseTipGeo, materials.wingMaterial);
   hullRoot.add(noseTipMesh);
@@ -327,38 +328,52 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   customMaterials.push(nozzleGlowMat);
 
   const plumeCoreMat = new THREE.MeshBasicMaterial({
-    color: 0xe6fbff,
+    color: 0xf0fcff,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.9,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
   const plumeOuterMat = new THREE.MeshBasicMaterial({
     color: 0x38bdf8,
     transparent: true,
-    opacity: 0.48,
+    opacity: 0.54,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  customMaterials.push(plumeCoreMat, plumeOuterMat);
+  // Roaring orange-amber afterburner heat envelope & shock diamonds when boosting
+  const plumeHeatMat = new THREE.MeshBasicMaterial({
+    color: 0xff7b29,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  customMaterials.push(plumeCoreMat, plumeOuterMat, plumeHeatMat);
 
   const coreConeGeo = new THREE.ConeGeometry(0.16, 1.9, 14, 1, true);
   coreConeGeo.rotateX(Math.PI / 2);
   coreConeGeo.translate(0, 0, 0.95);
   disposables.push(coreConeGeo);
 
-  const outerConeGeo = new THREE.ConeGeometry(0.26, 3.1, 14, 1, true);
+  const outerConeGeo = new THREE.ConeGeometry(0.27, 3.2, 14, 1, true);
   outerConeGeo.rotateX(Math.PI / 2);
-  outerConeGeo.translate(0, 0, 1.55);
+  outerConeGeo.translate(0, 0, 1.6);
   disposables.push(outerConeGeo);
 
+  const heatConeGeo = new THREE.ConeGeometry(0.39, 4.7, 14, 1, true);
+  heatConeGeo.rotateX(Math.PI / 2);
+  heatConeGeo.translate(0, 0, 2.35);
+  disposables.push(heatConeGeo);
+
   const enginePlumes: THREE.Group[] = [];
+  const heatCones: THREE.Mesh[] = [];
   const engineHaloSprites: THREE.Sprite[] = [];
   const haloMat = new THREE.SpriteMaterial({
     map: materials.glowTexture,
     color: 0x7dd3fc,
     transparent: true,
-    opacity: 0.62,
+    opacity: 0.65,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
@@ -379,6 +394,9 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
     plumeGroup.position.set(nx, -0.02, 2.94);
     plumeGroup.add(new THREE.Mesh(coreConeGeo, plumeCoreMat));
     plumeGroup.add(new THREE.Mesh(outerConeGeo, plumeOuterMat));
+    const heatCone = new THREE.Mesh(heatConeGeo, plumeHeatMat);
+    plumeGroup.add(heatCone);
+    heatCones.push(heatCone);
     hullRoot.add(plumeGroup);
     enginePlumes.push(plumeGroup);
 
@@ -464,24 +482,36 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       group.visible = visible;
       trailGroup.visible = visible;
     },
+    setCockpitMode: (isCockpit: boolean) => {
+      // Hide opaque canopy dome & rear spine when camera sits inside the glass cockpit
+      canopyMesh.visible = !isCockpit;
+      spineMesh.visible = !isCockpit;
+    },
     updateVisuals: (dt, mach, boosting, _roll, worldPos, worldQuat) => {
       flickerClock += dt;
 
-      // Dynamic thruster plume length, flicker, and blue-white glow intensity
+      // Dynamic thruster plume length, flicker, and roaring blue-and-orange afterburner flare
       const machFactor = Math.max(0.45, (mach - 0.85) * 0.75);
-      const boostFactor = boosting ? 1.55 : 1.0;
-      const flicker = 0.93 + Math.sin(flickerClock * 55) * 0.07 + Math.cos(flickerClock * 89) * 0.04;
-      const plumeZ = (0.8 + machFactor * 0.35) * boostFactor * flicker;
-      const plumeXY = (0.85 + (boosting ? 0.25 : 0)) * (0.96 + Math.sin(flickerClock * 42) * 0.04);
+      const boostFactor = boosting ? 1.88 : 1.0;
+      const flicker = 0.92 + Math.sin(flickerClock * 62) * 0.08 + Math.cos(flickerClock * 97) * 0.05;
+      const plumeZ = (0.82 + machFactor * 0.36) * boostFactor * flicker;
+      const plumeXY = (0.86 + (boosting ? 0.34 : 0)) * (0.95 + Math.sin(flickerClock * 46) * 0.05);
 
       for (let i = 0; i < enginePlumes.length; i++) {
         enginePlumes[i].scale.set(plumeXY, plumeXY, plumeZ);
-        const haloScale = (0.95 + (boosting ? 0.65 : 0) + machFactor * 0.18) * flicker;
+        // Subtle heat-shimmer wobble on the orange afterburner envelope
+        const shimmerX = 1 + Math.sin(flickerClock * 78 + i * 2.1) * 0.14;
+        const shimmerY = 1 + Math.cos(flickerClock * 69 + i * 1.7) * 0.14;
+        heatCones[i].scale.set(shimmerX, shimmerY, boosting ? 1.15 : 0.45);
+        const haloScale = (0.98 + (boosting ? 0.9 : 0) + machFactor * 0.2) * flicker;
         engineHaloSprites[i].scale.set(haloScale, haloScale, 1);
       }
 
-      engineLight.intensity = (7 + machFactor * 4 + (boosting ? 10 : 0)) * flicker;
-      plumeOuterMat.color.setHex(boosting ? 0x7dd3fc : 0x38bdf8);
+      engineLight.intensity = (7 + machFactor * 4 + (boosting ? 15 : 0)) * flicker;
+      engineLight.color.setHex(boosting ? 0xffb366 : 0x67e8f9);
+      plumeOuterMat.color.setHex(boosting ? 0x93e2ff : 0x38bdf8);
+      plumeHeatMat.opacity = boosting ? 0.56 * flicker : 0.0;
+      haloMat.color.setHex(boosting ? 0xffc88a : 0x7dd3fc);
 
       // Update expanding supersonic shockwave double-ring halo
       if (shockwaveTimer > 0) {

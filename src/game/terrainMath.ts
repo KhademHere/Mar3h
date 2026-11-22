@@ -1,4 +1,4 @@
-import type { CanyonObstacle, MartianZoneId, MartianZoneInfo } from './types';
+import type { CanyonObstacle, MartianZoneId, MartianZoneInfo, SpeedGate } from './types';
 
 export const CHUNK_LENGTH = 340;
 export const TERRAIN_WIDTH = 560;
@@ -790,3 +790,193 @@ export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
 
   return obstacles;
 }
+
+/**
+ * Generates safe, risk-vs-reward Glowing Speed Gates for a 340m chunk.
+ * Places 'flow' gates comfortably along the canyon rhythm and higher-reward 'bonus' gates
+ * framed beneath giant stone arches, inside split canyon tunnels, along outer curves, or
+ * hovering at inviting high/low altitudes — always strictly clear of terrain & solid rock.
+ */
+export function getSpeedGatesForChunk(chunkIndex: number): SpeedGate[] {
+  if (chunkIndex < 0) return [];
+  const gates: SpeedGate[] = [];
+  const zStart = -chunkIndex * CHUNK_LENGTH;
+  const obstacles = getObstaclesForChunk(chunkIndex);
+
+  const clampSafeGate = (
+    id: string,
+    rawX: number,
+    rawY: number,
+    z: number,
+    radius: number,
+    tier: 'flow' | 'bonus',
+  ): SpeedGate => {
+    const cx = getCanyonCenterX(z);
+    const hw = getCanyonHalfWidth(z);
+    // Never place a gate anywhere near a cliff wall
+    const maxLat = Math.max(14, hw * 0.58 - radius);
+    const x = Math.max(cx - maxLat, Math.min(cx + maxLat, rawX));
+    const groundY = getTerrainHeight(x, z);
+    const minY = groundY + radius + 5.2;
+    const maxY = 54;
+    const y = Math.max(minY, Math.min(maxY, rawY));
+
+    // Align ring gently perpendicular to the local canyon heading (-Z forward)
+    const dxCurve = getCanyonCenterX(z - 20) - getCanyonCenterX(z + 20);
+    const yaw = Math.atan2(-dxCurve, 40) * 0.45;
+    return { id, x, y, z, radius, tier, yaw };
+  };
+
+  // Chunk 0: Iconic opening Speed Gate floating right inside the grand stone arch + welcoming flow gate ahead
+  if (chunkIndex === 0) {
+    const arch = obstacles.find((o) => o.kind === 'arch');
+    if (arch) {
+      gates.push(
+        clampSafeGate(
+          'gate-0-arch',
+          arch.x,
+          arch.y + arch.height * 0.52,
+          arch.z,
+          11.2,
+          'bonus',
+        ),
+      );
+    }
+    return gates;
+  }
+
+  // Open-sky breather chunks: sweeping hero flow gate + optional outer-curve bonus gate to reward boosting!
+  if (isBreatherChunk(chunkIndex)) {
+    const z1 = zStart - CHUNK_LENGTH * 0.42;
+    const cx1 = getCanyonCenterX(z1);
+    const hw1 = getCanyonHalfWidth(z1);
+    const curveSide = chunkIndex % 2 === 0 ? 1 : -1;
+    gates.push(
+      clampSafeGate(
+        `gate-${chunkIndex}-breather`,
+        cx1 + curveSide * Math.min(18, hw1 * 0.26),
+        23 + (chunkIndex % 3) * 3.5,
+        z1,
+        11.0,
+        'flow',
+      ),
+    );
+    return gates;
+  }
+
+  // Obstacle-rich chunks: smartly pair gates with landmarks for exciting risk/reward lines!
+  const seed = chunkIndex * 29.73;
+  const primaryObs = obstacles[0];
+
+  if (primaryObs) {
+    if (primaryObs.kind === 'arch') {
+      // Bonus gate glowing squarely beneath the giant stone arch!
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-arch`,
+          primaryObs.x,
+          primaryObs.y + primaryObs.height * 0.52,
+          primaryObs.z,
+          11.0,
+          'bonus',
+        ),
+      );
+    } else if (primaryObs.kind === 'split-pillar') {
+      // Bonus gate tucked cleanly inside one of the two split canyon tunnels
+      const tunnelSide: -1 | 1 = hash1D(seed + 1) > 0.5 ? 1 : -1;
+      const hw = getCanyonHalfWidth(primaryObs.z);
+      const offset = Math.min(hw * 0.56, primaryObs.radius + 18.5);
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-split`,
+          primaryObs.x + tunnelSide * offset,
+          23,
+          primaryObs.z,
+          10.5,
+          'bonus',
+        ),
+      );
+    } else if (primaryObs.kind === 'overhang') {
+      // Bonus gate floating safely in the sunlit dive-low gap underneath the overhang
+      const awayBias = -(primaryObs.side ?? 1) * 10;
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-under`,
+          primaryObs.x + awayBias,
+          Math.max(15, primaryObs.y + primaryObs.height * 0.54),
+          primaryObs.z,
+          9.5,
+          'bonus',
+        ),
+      );
+    } else if (primaryObs.kind === 'low-ridge') {
+      // Bonus gate hovering invitingly right above the jagged low ridge crest!
+      const sideBias = (hash1D(seed + 2) - 0.5) * 24;
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-crest`,
+          primaryObs.x + sideBias,
+          primaryObs.y + primaryObs.height + 13.5,
+          primaryObs.z,
+          10.5,
+          'bonus',
+        ),
+      );
+    } else if (primaryObs.kind === 'broken-bridge') {
+      // Bonus gate framed right beneath the elevated broken viaduct span
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-bridge`,
+          primaryObs.x,
+          Math.max(15.5, primaryObs.y + primaryObs.height * 0.55),
+          primaryObs.z,
+          10.2,
+          'bonus',
+        ),
+      );
+    } else {
+      // Flow/bonus gate placed cleanly in open sky on the clear side of a comm-tower / solar-array / spire
+      const cx = getCanyonCenterX(primaryObs.z);
+      const hw = getCanyonHalfWidth(primaryObs.z);
+      const clearSide = primaryObs.x >= cx ? -1 : 1;
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-weave`,
+          cx + clearSide * Math.min(20, hw * 0.3),
+          22 + hash1D(seed + 3) * 8,
+          primaryObs.z,
+          10.8,
+          'flow',
+        ),
+      );
+    }
+  }
+
+  // On alternating chunks, add a crisp rhythm flow gate tucked along the approach/exit curve
+  if (chunkIndex % 2 === 1) {
+    const zFlow = zStart - CHUNK_LENGTH * 0.62;
+    // Ensure it doesn't crowd any obstacle in Z
+    const tooCloseToObstacle = obstacles.some((o) => Math.abs(o.z - zFlow) < 48);
+    if (!tooCloseToObstacle) {
+      const cx = getCanyonCenterX(zFlow);
+      const hw = getCanyonHalfWidth(zFlow);
+      const offSign = hash1D(seed + 7) > 0.5 ? 1 : -1;
+      const isBonus = hash1D(seed + 8) > 0.55;
+      const latOffset = isBonus ? offSign * Math.min(24, hw * 0.36) : offSign * 6;
+      const alt = isBonus ? 18 + hash1D(seed + 9) * 16 : 22;
+      gates.push(
+        clampSafeGate(
+          `gate-${chunkIndex}-curve`,
+          cx + latOffset,
+          alt,
+          zFlow,
+          isBonus ? 10.2 : 11.2,
+          isBonus ? 'bonus' : 'flow',
+        ),
+      );
+    }
+  }
+
+  return gates;
+}
+

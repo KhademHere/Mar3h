@@ -4,6 +4,7 @@ import {
   getCanyonHalfWidth,
   getDustDevilX,
   getObstaclesForChunk,
+  getSpeedGatesForChunk,
   getTerrainHeight,
   getZoneInfoAtZ,
 } from './terrainMath';
@@ -13,6 +14,7 @@ import type {
   MartianZoneId,
   MartianZoneInfo,
   ObstacleKind,
+  SpeedGate,
 } from './types';
 
 export const MIN_ALTITUDE_OFFSET = 2.6;
@@ -21,6 +23,9 @@ export const MAX_ALTITUDE = 76;
 export const START_MACH = 1.25;
 export const WORLD_UNITS_PER_MACH = 105; // 1.0 Mach -> 105 world m/s for crisp canyon rush feel
 export const MAX_DT = 0.05;
+/** Minimum boost energy required to recover after overheating the Boost Bar to empty */
+export const BOOST_OVERHEAT_RECOVERY_THRESHOLD = 0.25;
+export const BOOST_OVERHEAT_COOLDOWN_SEC = 2.0;
 
 export interface FlightState {
   x: number;
@@ -34,15 +39,19 @@ export interface FlightState {
   baseMach: number;
   boostMach: number;
   nearMissMach: number;
+  gateMach: number;
   mach: number;
   peakMach: number;
   boostCharge: number; // 0..1
   isBoosting: boolean;
   boostLockout: boolean;
+  boostCooldownTimer: number;
   survivalSeconds: number;
   distance: number;
   score: number;
   nearMissCount: number;
+  gateStreak: number;
+  gatesPassed: number;
   lastMilestoneMach: number;
   wallNearMissCooldown: number;
   /** Cooldown protecting slight grazes from turning into instant crashes; if hit again rapidly -> crash */
@@ -50,6 +59,7 @@ export interface FlightState {
   scrapeWarningTimer: number;
   currentZoneId: MartianZoneId;
   triggeredObstacleIds: string[];
+  resolvedGateIds: string[];
   crashed: boolean;
   crashReason: 'terrain' | 'obstacle' | null;
 }
@@ -60,6 +70,18 @@ export interface FlightStepEvents {
     machGain: number;
     source: 'wall' | ObstacleKind;
   } | null;
+  gatePassed: {
+    gateId: string;
+    multiplier: number;
+    bonusScore: number;
+    machGain: number;
+    boostRefill: number;
+    tier: 'flow' | 'bonus';
+    x: number;
+    y: number;
+    z: number;
+  } | null;
+  gateMissed: boolean;
   scrape: {
     source: 'terrain' | 'obstacle';
   } | null;
@@ -67,6 +89,7 @@ export interface FlightStepEvents {
   zoneChanged: MartianZoneInfo | null;
   crashed: boolean;
   boostStarted: boolean;
+  boostOverheated: boolean;
 }
 
 export function createInitialFlightState(): FlightState {
@@ -84,21 +107,26 @@ export function createInitialFlightState(): FlightState {
     baseMach: START_MACH,
     boostMach: 0,
     nearMissMach: 0,
+    gateMach: 0,
     mach: START_MACH,
     peakMach: START_MACH,
     boostCharge: 1.0,
     isBoosting: false,
     boostLockout: false,
+    boostCooldownTimer: 0,
     survivalSeconds: 0,
     distance: 0,
     score: 0,
     nearMissCount: 0,
+    gateStreak: 0,
+    gatesPassed: 0,
     lastMilestoneMach: 1.0,
     wallNearMissCooldown: 0,
     scrapeCooldown: 0,
     scrapeWarningTimer: 0,
     currentZoneId: getZoneInfoAtZ(0).id,
     triggeredObstacleIds: [],
+    resolvedGateIds: [],
     crashed: false,
     crashReason: null,
   };
@@ -135,7 +163,6 @@ export function evaluateObstacleClearance(
     const relY = py - obs.y;
     if (relY > obs.height + craftRadius + 10) return Infinity;
     const hRatio = Math.max(0, Math.min(1, relY / Math.max(1, obs.height)));
-    // Funnel tapers narrower at ground, widens subtly toward top
     const funnelRadius = obs.radius * (0.76 + hRatio * 0.42);
     const horizDist = Math.hypot(px - liveX, dz);
     if (relY > obs.height) {
@@ -166,7 +193,6 @@ export function evaluateObstacleClearance(
     const rz = obs.thickness * (1 - hRatio * 0.25);
     const dx = Math.abs(px - obs.x);
     const adz = Math.abs(dz);
-    // Smooth elliptical box distance matching the towering central rock wedge
     const ex = Math.max(0, dx - rx);
     const ez = Math.max(0, adz - rz);
     const insideDepth = ex === 0 && ez === 0 ? -Math.min(rx - dx, rz - adz) : Math.hypot(ex, ez);
@@ -182,7 +208,6 @@ export function evaluateObstacleClearance(
     if (relY < -2 || relY > obs.height + craftRadius + 10) return Infinity;
     const clampedY = Math.max(0, Math.min(obs.height, relY));
     const hRatio = clampedY / Math.max(1, obs.height);
-    // Tower leans laterally along X according to obs.yaw
     const leanX = obs.x + Math.sin(obs.yaw) * clampedY;
     const towerRadius = obs.radius * (1 - hRatio * 0.52) + (Math.abs(hRatio - 0.74) < 0.08 ? 2.2 : 0);
     const horizDist = Math.hypot(px - leanX, dz);
@@ -196,9 +221,7 @@ export function evaluateObstacleClearance(
   if (obs.kind === 'solar-array') {
     const relY = py - obs.y;
     if (relY > obs.height + craftRadius + 10) return Infinity;
-    // Heavy central support stem
     const stemDist = Math.hypot(px - obs.x, dz) - 2.6;
-    // Wide tilted photovoltaic wing panel (spans from y=9 to y=obs.height)
     const cosY = Math.cos(-obs.yaw);
     const sinY = Math.sin(-obs.yaw);
     const dx = px - obs.x;
@@ -236,7 +259,6 @@ export function evaluateObstacleClearance(
     const halfDepth = obs.thickness * 0.56;
     const zExcess = Math.max(0, Math.abs(lz) - halfDepth);
     const side = obs.side ?? 1;
-    // Cantilevered rock shelf anchored deep into `side` cliff wall and extending across valley
     const minX = side > 0 ? -obs.radius * 0.62 : -obs.radius * 1.45;
     const maxX = side > 0 ? obs.radius * 1.45 : obs.radius * 0.62;
     const xExcess = lx < minX ? minX - lx : lx > maxX ? lx - maxX : 0;
@@ -265,12 +287,11 @@ export function evaluateObstacleClearance(
     return Math.hypot(xExcess, yExcess, zExcess) - craftRadius;
   }
 
-  // 8. Abandoned Colony Broken Bridge Span (twin piers + broken elevated viaduct deck with center gap)
+  // 8. Abandoned Colony Broken Bridge Span
   if (obs.kind === 'broken-bridge') {
     const halfDepth = obs.thickness * 1.05;
     const zExcess = Math.max(0, Math.abs(lz) - halfDepth);
 
-    // Twin concrete/steel viaduct piers at +/- obs.radius
     const leftPier = Math.hypot(Math.max(0, Math.abs(lx + obs.radius) - 4.2), zExcess);
     const rightPier = Math.hypot(Math.max(0, Math.abs(lx - obs.radius) - 4.2), zExcess);
     const pierClearance =
@@ -278,7 +299,6 @@ export function evaluateObstacleClearance(
         ? Math.min(leftPier, rightPier) - craftRadius
         : Infinity;
 
-    // Broken elevated deck halves leaving a dramatic snapped gap in the middle (|lx| < 10.5)
     let deckClearance = Infinity;
     const gapHalf = 10.5;
     const deckBottom = obs.y + obs.height;
@@ -301,7 +321,6 @@ export function evaluateObstacleClearance(
   const halfDepth = obs.thickness * 0.72;
   const zExcess = Math.max(0, Math.abs(lz) - halfDepth);
 
-  // Two towering rock pillars at lx = +/- obs.radius
   const leftPillarDist = Math.hypot(
     Math.max(0, Math.abs(lx + obs.radius) - obs.thickness * 0.8),
     zExcess,
@@ -315,7 +334,6 @@ export function evaluateObstacleClearance(
       ? Math.min(leftPillarDist, rightPillarDist) - craftRadius
       : Infinity;
 
-  // Curved rock arch bridge span across the top (parabolic arch profile)
   let crownClearance = Infinity;
   if (Math.abs(lx) <= obs.radius + obs.thickness) {
     const normX = Math.min(1, Math.abs(lx) / Math.max(1, obs.radius));
@@ -334,16 +352,18 @@ export function evaluateObstacleClearance(
 }
 
 /**
- * Predictive smart Autoplay pilot that smoothly centers in the canyon, weaves around
- * split pillars, leaning comm towers, tilted solar panels, and moving dust devils,
- * dives under overhanging cliffs and broken bridges, climbs over jagged low ridges,
- * threads giant stone arches (under or over), and fires afterburners on open stretches.
+ * Predictive Elite Ace Autoplay pilot:
+ * 1. Actively hunts upcoming Glowing Speed Gates whenever the path is safe to stack Mach & refill boost.
+ * 2. Always prioritizes mountain, split-pillar, overhang, low-ridge, colony & dust-devil avoidance so it never crashes.
+ * 3. Fires strategic Afterburner bursts on straightaways, curve exits, and clear Speed Gate approaches
+ *    (when boost >= 56%) and shuts off cleanly before sharp bends, tight dodges, or low charge (<= 20%).
  */
 export function computeAutoplayInput(
   state: FlightState,
   obstacles: CanyonObstacle[],
   isGameplayAutoplay: boolean,
   worldTime = 0,
+  gates: SpeedGate[] = [],
 ): ControlInput {
   const speed = computeSpeedFromMach(state.mach);
   const lookAheadDist = Math.max(120, Math.min(265, speed * 0.96));
@@ -357,11 +377,47 @@ export function computeAutoplayInput(
   const hw = getCanyonHalfWidth(nearZ);
 
   let targetX =
-    canyonCenter + Math.sin(state.survivalSeconds * 0.36) * (isGameplayAutoplay ? 6.5 : 8.0);
-  let targetY = 22 + Math.sin(state.survivalSeconds * 0.29) * 3.5;
-  let clearAhead = true;
+    canyonCenter + Math.sin(state.survivalSeconds * 0.36) * (isGameplayAutoplay ? 5.5 : 7.5);
+  let targetY = 22 + Math.sin(state.survivalSeconds * 0.29) * 3.2;
 
-  // Sort upcoming obstacles so closer obstacles override farther ones cleanly
+  // --- Phase 1: Active Speed Gate Hunting (when safe!) ---
+  let huntingGate: SpeedGate | null = null;
+  let gateDist = Infinity;
+  for (let i = 0; i < gates.length; i++) {
+    const g = gates[i];
+    if (state.resolvedGateIds.includes(g.id)) continue;
+    const d = state.z - g.z; // positive ahead
+    if (d < -6 || d > 420) continue;
+    if (d < gateDist) {
+      // Ensure gate isn't blocked by an obstacle right on top of its center
+      let gateClear = true;
+      for (let j = 0; j < obstacles.length; j++) {
+        const obs = obstacles[j];
+        if (Math.abs(obs.z - g.z) > 28) continue;
+        const clr = evaluateObstacleClearance(g.x, g.y, g.z, obs, 4.5, worldTime + Math.max(0, d) / Math.max(70, speed));
+        if (clr < 2.0) {
+          gateClear = false;
+          break;
+        }
+      }
+      if (gateClear) {
+        gateDist = d;
+        huntingGate = g;
+      }
+    }
+  }
+
+  let linedUpOnGate = false;
+  if (huntingGate) {
+    const gateUrgency = Math.max(0.2, Math.min(1, 1 - Math.max(0, gateDist - 40) / 360));
+    targetX = targetX * (1 - gateUrgency) + huntingGate.x * gateUrgency;
+    targetY = targetY * (1 - gateUrgency) + huntingGate.y * gateUrgency;
+    const distErr = Math.hypot(state.x - huntingGate.x, state.y - huntingGate.y);
+    linedUpOnGate = gateDist > 35 && gateDist < 340 && distErr < 18;
+  }
+
+  // --- Phase 2: Safety-First Obstacle Avoidance (always takes strict priority over gate hunting!) ---
+  let tightObstacleAhead = false;
   const upcoming: { obs: CanyonObstacle; distAhead: number }[] = [];
   for (let i = 0; i < obstacles.length; i++) {
     const obs = obstacles[i];
@@ -369,63 +425,59 @@ export function computeAutoplayInput(
     if (distAhead < -18 || distAhead > 380) continue;
     upcoming.push({ obs, distAhead });
   }
-  // Process farthest first so closest obstacle always gets final priority
   upcoming.sort((a, b) => b.distAhead - a.distAhead);
 
   for (let i = 0; i < upcoming.length; i++) {
     const { obs, distAhead } = upcoming[i];
     const clampedDist = Math.max(0, distAhead);
     const urgency = Math.max(0, Math.min(1, 1 - clampedDist / 340));
-    const strongUrgency = Math.min(1, urgency * 1.35);
+    const strongUrgency = Math.min(1, urgency * 1.38);
     const obsCenter = getCanyonCenterX(obs.z);
     const obsHw = getCanyonHalfWidth(obs.z);
 
     if (obs.kind === 'arch') {
-      // Smoothly thread through the wide center under the arch (or glide over crown if already very high)
       targetX = targetX * (1 - strongUrgency) + obs.x * strongUrgency;
       const crownTop = obs.y + obs.height + obs.thickness * 1.25;
       if (state.y > crownTop + 4 && crownTop + 10 < MAX_ALTITUDE - 4) {
         const overY = crownTop + 10;
         targetY = targetY * (1 - strongUrgency) + overY * strongUrgency;
       } else {
-        const underY = Math.max(15, Math.min(obs.y + obs.height * 0.5, 24));
+        const underY = Math.max(15, Math.min(obs.y + obs.height * 0.52, 24));
         targetY = targetY * (1 - strongUrgency) + underY * strongUrgency;
       }
     } else if (obs.kind === 'split-pillar') {
-      // Pick the left or right tunnel side decisively and hold a clean bank through it
-      clearAhead = false;
-      const side = state.x >= obs.x ? 1 : -1;
+      if (clampedDist < 190) tightObstacleAhead = true;
+      // Prefer the tunnel side that aligns with a nearby Speed Gate if one exists!
+      let side: -1 | 1 = state.x >= obs.x ? 1 : -1;
+      if (huntingGate && Math.abs(huntingGate.z - obs.z) < 40) {
+        side = huntingGate.x >= obs.x ? 1 : -1;
+      }
       const safeOffset = Math.min(obsHw * 0.64, obs.radius + 17.5);
       const tunnelX = obs.x + side * safeOffset;
       targetX = targetX * (1 - strongUrgency) + tunnelX * strongUrgency;
       targetY = targetY * (1 - urgency * 0.5) + 23 * (urgency * 0.5);
     } else if (obs.kind === 'overhang') {
-      // Dive smoothly underneath the overhanging red cliff ledge
-      clearAhead = false;
+      if (clampedDist < 175) tightObstacleAhead = true;
       const floorAtObs = getTerrainHeight(obsCenter, obs.z);
       const diveY = Math.max(floorAtObs + 9.5, obs.y + obs.height - 11.5);
       targetY = targetY * (1 - strongUrgency) + diveY * strongUrgency;
-      // Also bias slightly away from the anchored canyon wall side
       const awayBias = -(obs.side ?? 1) * Math.min(14, obsHw * 0.22);
-      targetX = targetX * (1 - urgency * 0.7) + (obsCenter + awayBias) * (urgency * 0.7);
+      targetX = targetX * (1 - urgency * 0.65) + (obsCenter + awayBias) * (urgency * 0.65);
     } else if (obs.kind === 'low-ridge') {
-      // Climb cleanly high over the jagged ridge crest!
-      clearAhead = false;
+      if (clampedDist < 160 && state.y < obs.y + obs.height + 6) tightObstacleAhead = true;
       const climbY = Math.min(MAX_ALTITUDE - 12, obs.y + obs.height + 12.5);
       targetY = targetY * (1 - strongUrgency) + climbY * strongUrgency;
     } else if (obs.kind === 'broken-bridge') {
-      // Fly cleanly beneath the elevated broken viaduct span between its twin piers
       targetX = targetX * (1 - strongUrgency) + obs.x * strongUrgency;
       const floorAtObs = getTerrainHeight(obs.x, obs.z);
       const underBridgeY = Math.max(floorAtObs + 9.5, obs.y + obs.height - 11);
       targetY = targetY * (1 - strongUrgency) + underBridgeY * strongUrgency;
     } else if (obs.kind === 'dust-devil') {
-      // Predict where the drifting red dust devil will be when the craft reaches obs.z!
       const timeToReach = clampedDist / Math.max(70, speed);
       const futureX = getDustDevilX(obs, worldTime + timeToReach);
       const safeRadius = obs.radius + 18;
       if (Math.abs(targetX - futureX) < safeRadius) {
-        clearAhead = false;
+        if (clampedDist < 190) tightObstacleAhead = true;
         const preferRight = futureX <= obsCenter;
         const passX = futureX + (preferRight ? safeRadius : -safeRadius);
         const clampedPassX = Math.max(
@@ -435,14 +487,13 @@ export function computeAutoplayInput(
         targetX = targetX * (1 - strongUrgency) + clampedPassX * strongUrgency;
       }
     } else {
-      // Spire, buttress, leaning comm-tower, or giant tilted solar-array
       const effectiveObsX =
         obs.kind === 'comm-tower'
           ? obs.x + Math.sin(obs.yaw) * Math.max(0, state.y - obs.y)
           : obs.x;
       const safeRadius = obs.radius + 17;
       if (Math.abs(targetX - effectiveObsX) < safeRadius) {
-        clearAhead = false;
+        if (clampedDist < 175) tightObstacleAhead = true;
         const preferRight = effectiveObsX <= obsCenter;
         const passX = effectiveObsX + (preferRight ? safeRadius : -safeRadius);
         const clampedPassX = Math.max(
@@ -463,15 +514,32 @@ export function computeAutoplayInput(
   const minSafeY = Math.max(groundHere, groundAhead) + 9.5;
   targetY = Math.max(minSafeY, Math.min(MAX_ALTITUDE - 10, targetY));
 
-  const steerX = Math.max(-0.96, Math.min(0.96, (targetX - state.x) * 0.082 - state.vx * 0.0042));
-  const steerY = Math.max(-0.92, Math.min(0.92, (targetY - state.y) * 0.135 - state.vy * 0.0055));
+  const steerX = Math.max(-0.96, Math.min(0.96, (targetX - state.x) * 0.085 - state.vx * 0.0042));
+  const steerY = Math.max(-0.92, Math.min(0.92, (targetY - state.y) * 0.14 - state.vy * 0.0055));
 
-  // In gameplay Autoplay, periodically fire Afterburner on clear stretches to reach thrilling high Mach!
+  // --- Phase 3: Intelligent Strategic Afterburner Bursts ---
   let boost = false;
-  if (isGameplayAutoplay) {
-    const wantsSurge = state.boostCharge > 0.52 || (state.isBoosting && state.boostCharge > 0.22);
-    const aligned = Math.abs(targetX - state.x) < 16 && Math.abs(targetY - state.y) < 10;
-    boost = clearAhead && aligned && wantsSurge;
+  if (isGameplayAutoplay && !state.boostLockout) {
+    // Measure canyon curvature ahead to distinguish straightaways / curve exits vs sharp bends
+    const cNow = getCanyonCenterX(state.z);
+    const cMid = getCanyonCenterX(state.z - 150);
+    const cFar = getCanyonCenterX(state.z - 290);
+    const bendRate = Math.abs((cFar - cMid) - (cMid - cNow));
+    const lateralSweep = Math.abs(cMid - cNow);
+
+    const sharpBendAhead = bendRate > 16 || lateralSweep > 26;
+    const straightOrExit = bendRate < 11 && lateralSweep < 20;
+    const wellAligned = Math.abs(targetX - state.x) < 18 && Math.abs(targetY - state.y) < 11;
+
+    if (state.isBoosting) {
+      // Sustain burst until charge drops near 20%, or cut cleanly before sharp bends / tight obstacle dodges
+      boost = state.boostCharge > 0.2 && !sharpBendAhead && !tightObstacleAhead;
+    } else {
+      // Ignite strategic burst when energy is healthy (>= 56%) on straightaways, curve exits, or clean Speed Gate lines!
+      const healthyEnergy = state.boostCharge >= 0.56;
+      const strongOpportunity = (straightOrExit || linedUpOnGate) && wellAligned && !tightObstacleAhead && !sharpBendAhead;
+      boost = healthyEnergy && strongOpportunity;
+    }
   }
 
   return { steerX, steerY, boost };
@@ -479,8 +547,9 @@ export function computeAutoplayInput(
 
 /**
  * Pure simulation step for Ares Mach.
- * Advances position, velocity, banking, Mach progression, boost fuel, Martian zone tracking,
- * forgiving grazes, near-misses, solid-hit collisions, and smooth Autoplay piloting.
+ * Advances position, velocity, banking, Mach progression, Boost Bar with overheat cooldown,
+ * Glowing Speed Gates (streak multiplier + Mach burst + boost refill), Martian zone tracking,
+ * forgiving grazes, near-misses, solid-hit collisions, and smart Autoplay piloting.
  */
 export function stepFlightSimulation(
   prev: FlightState,
@@ -489,19 +558,23 @@ export function stepFlightSimulation(
   options?: {
     /** Title screen showcase cruise (invulnerable, steady Mach, no scoring) */
     autopilot?: boolean;
-    /** Active gameplay one-click Autoplay mode (scores, builds high Mach, dodges cleanly) */
+    /** Active gameplay one-click Autoplay mode (uses real Boost Bar, hunts Speed Gates, dodges cleanly) */
     gameplayAutoplay?: boolean;
     obstaclesOverride?: CanyonObstacle[];
+    gatesOverride?: SpeedGate[];
   },
 ): { state: FlightState; events: FlightStepEvents } {
   const dt = Math.min(Math.max(rawDt, 0), MAX_DT);
   const events: FlightStepEvents = {
     nearMiss: null,
+    gatePassed: null,
+    gateMissed: false,
     scrape: null,
     milestoneMach: null,
     zoneChanged: null,
     crashed: false,
     boostStarted: false,
+    boostOverheated: false,
   };
 
   if (prev.crashed || dt <= 0) {
@@ -511,12 +584,13 @@ export function stepFlightSimulation(
   const next: FlightState = {
     ...prev,
     triggeredObstacleIds: prev.triggeredObstacleIds,
+    resolvedGateIds: prev.resolvedGateIds,
   };
 
   const titleAutopilot = Boolean(options?.autopilot);
   const gameplayAutoplay = Boolean(options?.gameplayAutoplay) && !titleAutopilot;
 
-  // Gather nearby obstacles up front (used for both smart Autoplay lookahead & collision checks)
+  // Gather nearby obstacles & Speed Gates up front (used for both smart Autoplay & gameplay evaluation)
   const chunkIdx = Math.max(0, Math.floor(-prev.z / CHUNK_LENGTH));
   const obstacles =
     options?.obstaclesOverride ?? [
@@ -526,39 +600,59 @@ export function stepFlightSimulation(
       ...getObstaclesForChunk(chunkIdx + 2),
     ];
 
-  // Determine effective steering
+  const gates =
+    options?.gatesOverride ?? [
+      ...getSpeedGatesForChunk(chunkIdx),
+      ...(chunkIdx > 0 ? getSpeedGatesForChunk(chunkIdx - 1) : []),
+      ...getSpeedGatesForChunk(chunkIdx + 1),
+      ...getSpeedGatesForChunk(chunkIdx + 2),
+    ];
+
+  // Determine effective steering & boost intent
   let steerX = Math.max(-1, Math.min(1, input.steerX));
   let steerY = Math.max(-1, Math.min(1, input.steerY));
   let wantsBoost = input.boost;
 
   if (titleAutopilot || gameplayAutoplay) {
-    const ai = computeAutoplayInput(prev, obstacles, gameplayAutoplay, prev.survivalSeconds);
+    const ai = computeAutoplayInput(prev, obstacles, gameplayAutoplay, prev.survivalSeconds, gates);
     steerX = ai.steerX;
     steerY = ai.steerY;
     wantsBoost = ai.boost;
   }
 
-  // Afterburner fuel & surge logic
-  if (next.boostLockout && next.boostCharge >= 0.2) {
+  // --- Afterburner Boost Bar & Overheat Cooldown Rules (shared identically by Player & Autoplay) ---
+  if (next.boostCooldownTimer > 0) {
+    next.boostCooldownTimer = Math.max(0, next.boostCooldownTimer - dt);
+  }
+  if (
+    next.boostLockout &&
+    next.boostCooldownTimer <= 0 &&
+    next.boostCharge >= BOOST_OVERHEAT_RECOVERY_THRESHOLD
+  ) {
     next.boostLockout = false;
   }
-  const canBoost = wantsBoost && !next.boostLockout && next.boostCharge > 0.01;
+
+  const canBoost = wantsBoost && !next.boostLockout && next.boostCharge > 0.008;
   if (canBoost) {
     if (!prev.isBoosting) {
       events.boostStarted = true;
     }
     next.isBoosting = true;
-    next.boostCharge = Math.max(0, next.boostCharge - dt * 0.30);
+    next.boostCharge = Math.max(0, next.boostCharge - dt * 0.28);
     if (next.boostCharge <= 0.005) {
+      next.boostCharge = 0;
       next.boostLockout = true;
+      next.boostCooldownTimer = BOOST_OVERHEAT_COOLDOWN_SEC;
       next.isBoosting = false;
+      events.boostOverheated = true;
     }
   } else {
     next.isBoosting = false;
-    next.boostCharge = Math.min(1, next.boostCharge + dt * 0.16);
+    const rechargeRate = next.boostLockout ? 0.135 : 0.165;
+    next.boostCharge = Math.min(1, next.boostCharge + dt * rechargeRate);
   }
 
-  // Exciting starting speed with a smoother, more gradual difficulty/speed ramp
+  // Exciting starting speed with gradual progression
   if (!titleAutopilot) {
     next.survivalSeconds += dt;
     const accelRate = 0.0145 / (1 + Math.max(0, next.baseMach - START_MACH) * 0.24);
@@ -568,12 +662,13 @@ export function stepFlightSimulation(
     next.baseMach = 1.4;
   }
 
-  // Smooth boost Mach & decaying Near-Miss surge
-  const targetBoostMach = next.isBoosting ? 0.82 : 0;
-  next.boostMach = damp(next.boostMach, targetBoostMach, next.isBoosting ? 5.2 : 3.0, dt);
+  // Smooth boost Mach surge (+0.92 Mach), decaying Near-Miss surge, and Speed Gate Mach burst
+  const targetBoostMach = next.isBoosting ? 0.92 : 0;
+  next.boostMach = damp(next.boostMach, targetBoostMach, next.isBoosting ? 5.8 : 3.0, dt);
   next.nearMissMach = damp(next.nearMissMach, 0, 1.35, dt);
+  next.gateMach = damp(next.gateMach, 0, 1.05, dt);
 
-  next.mach = next.baseMach + next.boostMach + next.nearMissMach;
+  next.mach = next.baseMach + next.boostMach + next.nearMissMach + next.gateMach;
   if (!titleAutopilot && next.mach > next.peakMach) {
     next.peakMach = next.mach;
   }
@@ -627,11 +722,76 @@ export function stepFlightSimulation(
   next.pitch = damp(next.pitch, targetPitch, 9.0, dt);
   next.yaw = damp(next.yaw, targetYaw, 8.0, dt);
 
-  // Distance & score accumulation
+  // --- Glowing Speed Gate Detection (Runs identically for both Human & Gameplay Autoplay!) ---
+  if (!titleAutopilot) {
+    for (let i = 0; i < gates.length; i++) {
+      const gate = gates[i];
+      if (next.resolvedGateIds.includes(gate.id)) continue;
+
+      const crossedPlane = prev.z >= gate.z - 4 && next.z <= gate.z + 4;
+      const radialDist = Math.hypot(next.x - gate.x, next.y - gate.y);
+
+      if (crossedPlane && radialDist <= gate.radius + 2.6) {
+        const updatedResolved =
+          next.resolvedGateIds.length > 28
+            ? [...next.resolvedGateIds.slice(-18), gate.id]
+            : [...next.resolvedGateIds, gate.id];
+        next.resolvedGateIds = updatedResolved;
+
+        next.gateStreak += 1;
+        next.gatesPassed += 1;
+        const multiplier = 1 + next.gateStreak; // x2 on 1st gate, x3 on 2nd, x4 on 3rd...
+        const basePoints = gate.tier === 'bonus' ? 500 : 350;
+        const bonusScore = Math.round(basePoints * multiplier);
+        const machGain = gate.tier === 'bonus' ? 0.34 : 0.28;
+        const boostRefill = gate.tier === 'bonus' ? 0.36 : 0.3;
+
+        next.score += bonusScore;
+        next.gateMach = Math.min(0.85, next.gateMach + machGain);
+        next.mach = next.baseMach + next.boostMach + next.nearMissMach + next.gateMach;
+        if (next.mach > next.peakMach) next.peakMach = next.mach;
+
+        // Instant Boost Bar Refill Bonus!
+        next.boostCharge = Math.min(1, next.boostCharge + boostRefill);
+        if (next.boostLockout && next.boostCharge >= BOOST_OVERHEAT_RECOVERY_THRESHOLD) {
+          next.boostCooldownTimer = Math.min(next.boostCooldownTimer, 0.35);
+        }
+
+        events.gatePassed = {
+          gateId: gate.id,
+          multiplier,
+          bonusScore,
+          machGain,
+          boostRefill,
+          tier: gate.tier,
+          x: gate.x,
+          y: gate.y,
+          z: gate.z,
+        };
+        break;
+      }
+
+      // Gently reset Gate Streak back to x1 once craft passes cleanly beyond a missed gate
+      if (next.z < gate.z - 18) {
+        const updatedResolved =
+          next.resolvedGateIds.length > 28
+            ? [...next.resolvedGateIds.slice(-18), gate.id]
+            : [...next.resolvedGateIds, gate.id];
+        next.resolvedGateIds = updatedResolved;
+        if (next.gateStreak > 0) {
+          next.gateStreak = 0;
+          events.gateMissed = true;
+        }
+      }
+    }
+  }
+
+  // Distance & score accumulation (scaled by active Gate Streak Multiplier!)
   if (!titleAutopilot) {
     const dz = forwardSpeed * dt;
+    const streakFactor = 1 + Math.min(3.5, next.gateStreak * 0.25);
     next.distance += dz;
-    next.score += dz * (0.42 * next.mach) * (next.isBoosting ? 1.35 : 1.0);
+    next.score += dz * (0.42 * next.mach) * (next.isBoosting ? 1.35 : 1.0) * streakFactor;
   }
 
   if (next.wallNearMissCooldown > 0) {
@@ -791,9 +951,9 @@ export function stepFlightSimulation(
       next.nearMissCount += 1;
       next.score += bonusScore;
       next.nearMissMach = Math.min(0.65, next.nearMissMach + machGain);
-      next.mach = next.baseMach + next.boostMach + next.nearMissMach;
+      next.mach = next.baseMach + next.boostMach + next.nearMissMach + next.gateMach;
       if (next.mach > next.peakMach) next.peakMach = next.mach;
-      next.boostCharge = Math.min(1, next.boostCharge + 0.26);
+      next.boostCharge = Math.min(1, next.boostCharge + 0.24);
       next.wallNearMissCooldown = 1.1;
 
       events.nearMiss = {
@@ -817,7 +977,7 @@ export function stepFlightSimulation(
     next.nearMissCount += 1;
     next.score += bonusScore;
     next.nearMissMach = Math.min(0.65, next.nearMissMach + machGain);
-    next.mach = next.baseMach + next.boostMach + next.nearMissMach;
+    next.mach = next.baseMach + next.boostMach + next.nearMissMach + next.gateMach;
     if (next.mach > next.peakMach) next.peakMach = next.mach;
     next.boostCharge = Math.min(1, next.boostCharge + 0.2);
     next.wallNearMissCooldown = 1.45;

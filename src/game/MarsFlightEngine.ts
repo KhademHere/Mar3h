@@ -12,8 +12,23 @@ import {
   type FlightState,
 } from './simulation';
 import { createSpacecraftRig, type SpacecraftRig } from './spacecraft';
-import { getZoneInfoAtZ } from './terrainMath';
-import type { ControlInput, FlightTelemetry, GamePhase, HudBannerEvent, RunSummary } from './types';
+import { getTerrainHeight, getZoneInfoAtZ } from './terrainMath';
+import type {
+  CameraViewMode,
+  ControlInput,
+  FlightTelemetry,
+  GamePhase,
+  HudBannerEvent,
+  RunSummary,
+} from './types';
+
+const CAMERA_VIEW_ORDER: readonly CameraViewMode[] = ['chase', 'cockpit', 'wing', 'cinematic'];
+const CAMERA_VIEW_LABELS: Record<CameraViewMode, { label: string; sublabel: string }> = {
+  chase: { label: 'VIEW: CHASE CAM', sublabel: 'SUPERSONIC PURSUIT' },
+  cockpit: { label: 'VIEW: COCKPIT', sublabel: 'FIRST-PERSON CANOPY' },
+  wing: { label: 'VIEW: WING CAM', sublabel: 'WING-TIP ACTION MOUNT' },
+  cinematic: { label: 'VIEW: CINEMATIC FLYBY', sublabel: 'DYNAMIC SHOWCASE CAM' },
+};
 
 const STORAGE_BEST_SCORE = 'ares_mach_best_score_v1';
 const STORAGE_BEST_MACH = 'ares_mach_best_mach_v1';
@@ -42,7 +57,9 @@ export interface MarsFlightCallbacks {
   onMuteChange: (muted: boolean) => void;
   onNearMissFlash: () => void;
   onScrapeFlash: () => void;
+  onGateFlash: () => void;
   onAutoplayChange: (active: boolean) => void;
+  onCameraViewChange: (view: CameraViewMode) => void;
 }
 
 /**
@@ -70,6 +87,10 @@ export class MarsFlightEngine {
   private phase: GamePhase = 'title';
   private flight: FlightState = createInitialFlightState();
   private autoplayActive = false;
+  private cameraView: CameraViewMode = 'chase';
+  private cinematicClock = 0;
+  private lastCinematicShotIdx = -1;
+  private gateWindBurstTimer = 0;
   private bestScore = 0;
   private bestMach = 1.25;
 
@@ -101,6 +122,7 @@ export class MarsFlightEngine {
   private readonly _craftQuat = new THREE.Quaternion();
   private readonly _camTargetPos = new THREE.Vector3();
   private readonly _camLookAt = new THREE.Vector3();
+  private readonly _camUpScratch = new THREE.Vector3(0, 1, 0);
   private readonly _curCamLook = new THREE.Vector3(0, 20, -40);
   private readonly _controlInput: ControlInput = { steerX: 0, steerY: 0, boost: false };
 
@@ -333,6 +355,74 @@ export class MarsFlightEngine {
     return next;
   }
 
+  public setCameraView(view: CameraViewMode, announce = true): void {
+    this.cameraView = view;
+    this.cinematicClock = 0;
+    this.lastCinematicShotIdx = -1;
+    this.spacecraft.setCockpitMode(view === 'cockpit' && this.phase === 'playing');
+    if (view !== 'cockpit') {
+      this.camera.up.set(0, 1, 0);
+    }
+    // Snap camera immediately and repaint so switching feels crisp with zero stale frame
+    if (this.phase === 'playing') {
+      this.applyCameraSnapForCurrentView();
+      this.renderer.render(this.scene, this.camera);
+    }
+    this.callbacks.onCameraViewChange(view);
+    if (announce && this.phase === 'playing') {
+      const meta = CAMERA_VIEW_LABELS[view];
+      this.callbacks.onBanner({
+        id: this.bannerSeq++,
+        kind: 'camera',
+        label: meta.label,
+        sublabel: meta.sublabel,
+      });
+    }
+    this.emitTelemetryNow();
+  }
+
+  public cycleCameraView(): CameraViewMode {
+    this.audio.unlock();
+    this.audio.playCameraSwitch();
+    const idx = CAMERA_VIEW_ORDER.indexOf(this.cameraView);
+    const next = CAMERA_VIEW_ORDER[(idx + 1) % CAMERA_VIEW_ORDER.length];
+    this.setCameraView(next, true);
+    return next;
+  }
+
+  private applyCameraSnapForCurrentView(): void {
+    if (this.cameraView === 'cockpit') {
+      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this.camera.position.copy(this._camTargetPos);
+      this._curCamLook.copy(this._camLookAt);
+      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._craftQuat);
+      this.camera.up.copy(this._camUpScratch);
+      this.camera.lookAt(this._curCamLook);
+    } else if (this.cameraView === 'wing') {
+      this.camera.up.set(0, 1, 0);
+      this._camTargetPos.set(4.65, 0.82, 3.85).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(-0.4, 0.16, -34).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this.camera.position.copy(this._camTargetPos);
+      this._curCamLook.copy(this._camLookAt);
+      this.camera.lookAt(this._curCamLook);
+    } else if (this.cameraView === 'cinematic') {
+      this.camera.up.set(0, 1, 0);
+      this.lastCinematicShotIdx = 0;
+      const desiredX = this.flight.x + 14;
+      const desiredZ = this.flight.z - 18;
+      const safeY = Math.max(getTerrainHeight(desiredX, desiredZ) + 5.0, this.flight.y + 4.2);
+      this.camera.position.set(desiredX, safeY, desiredZ);
+      this._curCamLook.set(this.flight.x, this.flight.y + 0.5, this.flight.z);
+      this.camera.lookAt(this._curCamLook);
+    } else {
+      this.camera.up.set(0, 1, 0);
+      this.camera.position.set(this.flight.x, this.flight.y + 3.8, this.flight.z + 11.8);
+      this._curCamLook.set(this.flight.x, this.flight.y + 1.0, this.flight.z - 54);
+      this.camera.lookAt(this._curCamLook);
+    }
+  }
+
   public startRun(withAutoplay?: boolean): void {
     this.audio.unlock();
     this.keysHeld.clear();
@@ -346,6 +436,8 @@ export class MarsFlightEngine {
     this.cameraTrauma = 0;
     this.nearMissFovKick = 0;
     this.shockwaveFovKick = 0;
+    this.gateWindBurstTimer = 0;
+    this.cinematicClock = 0;
 
     if (typeof withAutoplay === 'boolean') {
       this.autoplayActive = withAutoplay;
@@ -355,14 +447,12 @@ export class MarsFlightEngine {
     this.flight = createInitialFlightState();
     this.world.reset();
     this.spacecraft.setVisible(true);
+    this.spacecraft.setCockpitMode(this.cameraView === 'cockpit');
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
     this.resetFxTrails();
 
-    // Snap chase camera cleanly right behind the craft for immediate zero-disorientation launch
-    this.camera.position.set(this.flight.x, this.flight.y + 4.4, this.flight.z + 12.8);
-    this._curCamLook.set(this.flight.x, this.flight.y + 1.2, this.flight.z - 42);
-    this.camera.lookAt(this._curCamLook);
+    this.applyCameraSnapForCurrentView();
     this.camera.fov = 65;
     this.camera.updateProjectionMatrix();
 
@@ -402,6 +492,8 @@ export class MarsFlightEngine {
     this.flight = createInitialFlightState();
     this.world.reset();
     this.spacecraft.setVisible(true);
+    this.spacecraft.setCockpitMode(false);
+    this.camera.up.set(0, 1, 0);
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
     this.resetFxTrails();
@@ -462,6 +554,11 @@ export class MarsFlightEngine {
 
     if (code === 'KeyR' && !e.repeat && (this.phase === 'playing' || this.phase === 'paused')) {
       this.startRun(this.autoplayActive);
+      return;
+    }
+
+    if (code === 'KeyC' && !e.repeat && this.phase === 'playing') {
+      this.cycleCameraView();
       return;
     }
 
@@ -666,6 +763,7 @@ export class MarsFlightEngine {
 
   private updateCamera(dt: number): void {
     if (this.phase === 'title') {
+      this.camera.up.set(0, 1, 0);
       this.titleOrbitClock += dt;
       const swayX = Math.sin(this.titleOrbitClock * 0.36) * 5.8;
       const swayY = 4.6 + Math.cos(this.titleOrbitClock * 0.28) * 1.4;
@@ -685,53 +783,164 @@ export class MarsFlightEngine {
       return;
     }
 
-    // Intense close-behind supersonic chase camera
-    const boostPull = this.flight.isBoosting ? 1.85 : 0;
-    const desiredCamX = this.flight.x - this.flight.vx * 0.046;
-    const desiredCamY = Math.max(this.flight.y + 3.65 - this.flight.vy * 0.032, 4.8);
-    const desiredCamZ = this.flight.z + 11.4 + boostPull;
-
-    this.camera.position.x = damp(this.camera.position.x, desiredCamX, 11, dt);
-    this.camera.position.y = damp(this.camera.position.y, desiredCamY, 10, dt);
-    this.camera.position.z = desiredCamZ;
-
-    this._camLookAt.set(
-      this.flight.x + this.flight.vx * 0.12,
-      this.flight.y + 0.95 + this.flight.vy * 0.06,
-      this.flight.z - 56,
-    );
-    this._curCamLook.x = damp(this._curCamLook.x, this._camLookAt.x, 12, dt);
-    this._curCamLook.y = damp(this._curCamLook.y, this._camLookAt.y, 12, dt);
-    this._curCamLook.z = this._camLookAt.z;
-    this.camera.lookAt(this._curCamLook);
-
-    const camRoll = this.flight.roll * 0.24;
-
     // Decaying trauma*trauma shake + extreme-Mach aerodynamic vibration
     this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 1.85);
     const shakeMag = this.cameraTrauma * this.cameraTrauma;
     const speedRattle =
       !this.flight.crashed
-        ? Math.max(0, this.flight.mach - 1.75) * 0.026 + (this.flight.isBoosting ? 0.04 : 0)
+        ? Math.max(0, this.flight.mach - 1.75) * 0.026 + (this.flight.isBoosting ? 0.042 : 0)
         : 0;
 
-    if (shakeMag > 0.001 || speedRattle > 0.001) {
-      const amp = shakeMag * 0.75 + speedRattle;
-      this.camera.position.x += (Math.random() - 0.5) * amp * 1.4;
-      this.camera.position.y += (Math.random() - 0.5) * amp * 1.4;
-      this.camera.rotation.z += camRoll + (Math.random() - 0.5) * amp * 0.08;
+    if (this.cameraView === 'cockpit' && !this.flight.crashed) {
+      // 2. First-Person Cockpit View: inside glass canopy looking cleanly over the tapered needle nose
+      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this.camera.position.copy(this._camTargetPos);
+      this._curCamLook.copy(this._camLookAt);
+
+      // Subtle aerodynamic rattle inside the cockpit at extreme Mach / afterburners
+      if (shakeMag > 0.001 || speedRattle > 0.001) {
+        const amp = shakeMag * 0.22 + speedRattle * 0.42;
+        this.camera.position.x += (Math.random() - 0.5) * amp;
+        this.camera.position.y += (Math.random() - 0.5) * amp;
+      }
+
+      // Authentic roll tilt from spacecraft orientation
+      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._craftQuat);
+      this.camera.up.lerp(this._camUpScratch, 1 - Math.exp(-16 * dt));
+      this.camera.lookAt(this._curCamLook);
+    } else if (this.cameraView === 'wing' && !this.flight.crashed) {
+      // 3. Wing-Tip Action View: dramatic starboard wing mount showcasing glowing thruster flare + needle nose!
+      this.camera.up.set(0, 1, 0);
+      const boostBack = this.flight.isBoosting ? 0.65 : 0;
+      this._camTargetPos
+        .set(4.65, 0.82, 3.85 + boostBack)
+        .applyQuaternion(this._craftQuat)
+        .add(this._craftPos);
+      this._camLookAt.set(-0.4, 0.16, -34).applyQuaternion(this._craftQuat).add(this._craftPos);
+
+      this.camera.position.x = damp(this.camera.position.x, this._camTargetPos.x, 18, dt);
+      this.camera.position.y = damp(this.camera.position.y, this._camTargetPos.y, 18, dt);
+      this.camera.position.z = this._camTargetPos.z;
+
+      this._curCamLook.x = damp(this._curCamLook.x, this._camLookAt.x, 16, dt);
+      this._curCamLook.y = damp(this._curCamLook.y, this._camLookAt.y, 16, dt);
+      this._curCamLook.z = this._camLookAt.z;
+      this.camera.lookAt(this._curCamLook);
+
+      const amp = shakeMag * 0.45 + speedRattle * 0.75;
+      if (amp > 0.001) {
+        this.camera.position.x += (Math.random() - 0.5) * amp;
+        this.camera.position.y += (Math.random() - 0.5) * amp;
+      }
+      this.camera.rotation.z += this.flight.roll * 0.42;
+    } else if (this.cameraView === 'cinematic') {
+      // 4. Cinematic Flyby View: sweeping filmic camera cutting cleanly every ~6s across 4 heroic angles!
+      this.camera.up.set(0, 1, 0);
+      this.cinematicClock += dt;
+      const shotDuration = 6.0;
+      const shotIdx = Math.floor(this.cinematicClock / shotDuration) % 4;
+      const shotT = (this.cinematicClock % shotDuration) / shotDuration; // 0..1
+
+      let offX = 0;
+      let offY = 4;
+      let offZ = 14;
+      let lookZ = -18;
+
+      if (shotIdx === 0) {
+        // Shot 0: Heroic low front-quarter tracking angle looking back at the roaring jet & towering cliffs
+        offX = 14 - shotT * 8.5;
+        offY = 4.2 + Math.sin(shotT * Math.PI) * 2.5;
+        offZ = -18 + shotT * 5.0;
+        lookZ = 0.5;
+      } else if (shotIdx === 1) {
+        // Shot 1: Wide dramatic side-tracking flyby gliding alongside the banking supersonic jet
+        offX = -21 + shotT * 5;
+        offY = 4.6 + Math.cos(shotT * Math.PI) * 2.2;
+        offZ = -3 + shotT * 11;
+        lookZ = -10;
+      } else if (shotIdx === 2) {
+        // Shot 2: Sweeping high canyon overview looking down as the jet threads arches & Speed Gates
+        offX = -10 + shotT * 20;
+        offY = 17.5 - shotT * 4;
+        offZ = 18.5;
+        lookZ = -34;
+      } else {
+        // Shot 3: Dramatic low rear-quarter hero chase skimming close to the Martian floor
+        offX = 9.5 - shotT * 19;
+        offY = 2.4 + shotT * 2.4;
+        offZ = 13.5 + (this.flight.isBoosting ? 2.5 : 0);
+        lookZ = -38;
+      }
+
+      const desiredX = this.flight.x + offX;
+      const desiredZ = this.flight.z + offZ;
+      const minSafeCamY = getTerrainHeight(desiredX, desiredZ) + 5.0;
+      const desiredY = Math.max(minSafeCamY, this.flight.y + offY);
+
+      if (shotIdx !== this.lastCinematicShotIdx) {
+        this.lastCinematicShotIdx = shotIdx;
+        this.camera.position.set(desiredX, desiredY, desiredZ);
+        this._curCamLook.set(this.flight.x, this.flight.y + 0.6, this.flight.z + lookZ);
+      } else {
+        this.camera.position.x = damp(this.camera.position.x, desiredX, 6.0, dt);
+        this.camera.position.y = damp(this.camera.position.y, desiredY, 6.0, dt);
+        this.camera.position.z = damp(this.camera.position.z, desiredZ, 8.5, dt);
+        this._camLookAt.set(this.flight.x, this.flight.y + 0.6, this.flight.z + lookZ);
+        this._curCamLook.x = damp(this._curCamLook.x, this._camLookAt.x, 9.0, dt);
+        this._curCamLook.y = damp(this._curCamLook.y, this._camLookAt.y, 9.0, dt);
+        this._curCamLook.z = damp(this._curCamLook.z, this._camLookAt.z, 11.0, dt);
+      }
+      this.camera.lookAt(this._curCamLook);
     } else {
-      this.camera.rotation.z += camRoll;
+      // 1. Chase View (Default): energetic behind-the-craft chase that pulls smoothly back when afterburners roar
+      this.camera.up.set(0, 1, 0);
+      const boostPull = this.flight.isBoosting ? 2.6 : 0;
+      const desiredCamX = this.flight.x - this.flight.vx * 0.046;
+      const desiredCamY = Math.max(this.flight.y + 3.65 - this.flight.vy * 0.032, 4.8);
+      const desiredCamZ = this.flight.z + 11.4 + boostPull;
+
+      this.camera.position.x = damp(this.camera.position.x, desiredCamX, 11, dt);
+      this.camera.position.y = damp(this.camera.position.y, desiredCamY, 10, dt);
+      this.camera.position.z = damp(this.camera.position.z, desiredCamZ, 7.5, dt);
+
+      this._camLookAt.set(
+        this.flight.x + this.flight.vx * 0.12,
+        this.flight.y + 0.95 + this.flight.vy * 0.06,
+        this.flight.z - 56,
+      );
+      this._curCamLook.x = damp(this._curCamLook.x, this._camLookAt.x, 12, dt);
+      this._curCamLook.y = damp(this._curCamLook.y, this._camLookAt.y, 12, dt);
+      this._curCamLook.z = this._camLookAt.z;
+      this.camera.lookAt(this._curCamLook);
+
+      const camRoll = this.flight.roll * 0.24;
+      if (shakeMag > 0.001 || speedRattle > 0.001) {
+        const amp = shakeMag * 0.75 + speedRattle;
+        this.camera.position.x += (Math.random() - 0.5) * amp * 1.4;
+        this.camera.position.y += (Math.random() - 0.5) * amp * 1.4;
+        this.camera.rotation.z += camRoll + (Math.random() - 0.5) * amp * 0.08;
+      } else {
+        this.camera.rotation.z += camRoll;
+      }
     }
 
-    // Dynamic FOV widening with Mach speed, afterburner, near-miss, and shockwave kicks
+    // Dynamic FOV widening with Mach speed, afterburner, near-miss, gate burst, and shockwave kicks
     this.nearMissFovKick = damp(this.nearMissFovKick, 0, 4.2, dt);
     this.shockwaveFovKick = damp(this.shockwaveFovKick, 0, 3.5, dt);
+    const baseFov =
+      this.cameraView === 'cockpit'
+        ? 72
+        : this.cameraView === 'wing'
+          ? 70
+          : this.cameraView === 'cinematic'
+            ? 58
+            : 62;
     const targetFov = Math.min(
-      92,
-      62 +
-        Math.max(0, this.flight.mach - 1.0) * 7.0 +
-        (this.flight.isBoosting ? 7.5 : 0) +
+      96,
+      baseFov +
+        Math.max(0, this.flight.mach - 1.0) * 6.8 +
+        (this.flight.isBoosting ? 8.2 : 0) +
         this.nearMissFovKick +
         this.shockwaveFovKick,
     );
@@ -880,13 +1089,19 @@ export class MarsFlightEngine {
       return;
     }
 
+    if (this.gateWindBurstTimer > 0) {
+      this.gateWindBurstTimer = Math.max(0, this.gateWindBurstTimer - dt);
+    }
     const mach = this.flight.mach;
-    const boostExtra = this.flight.isBoosting ? 0.35 : 0;
-    const rawIntensity = Math.max(0, Math.min(1, (mach - 1.0) / 2.2 + boostExtra));
+    const boostExtra = this.flight.isBoosting ? 0.38 : 0;
+    const gateExtra = this.gateWindBurstTimer > 0 ? 0.42 * Math.min(1, this.gateWindBurstTimer) : 0;
+    const rawIntensity = Math.max(0, Math.min(1, (mach - 1.0) / 2.2 + boostExtra + gateExtra));
     const intensity = this.phase === 'title' ? rawIntensity * 0.45 : rawIntensity;
 
-    // 1. Draw Mach-reactive luminous aircraft trails projected onto fxCanvasRef
-    this.drawFxAircraftTrails(ctx, w, h, mach, this.flight.isBoosting);
+    // 1. Draw Mach-reactive luminous aircraft trails projected onto fxCanvasRef (hidden in cockpit view for crisp glass)
+    if (this.cameraView !== 'cockpit' || this.phase === 'title') {
+      this.drawFxAircraftTrails(ctx, w, h, mach, this.flight.isBoosting);
+    }
 
     const cx = w * 0.5;
     const cy = h * 0.48;
@@ -909,9 +1124,13 @@ export class MarsFlightEngine {
       ctx.fillRect(0, 0, w, h);
     }
 
-    // 3. Rushing white wind streaks along the screen periphery
+    // 3. Rushing wind streaks along the screen periphery (intensifies on afterburners & Speed Gate surges!)
     const activeCount = Math.floor(18 + intensity * (this.windStreaks.length - 18));
-    const travelRate = 1.45 + mach * 0.85 + (this.flight.isBoosting ? 1.15 : 0);
+    const travelRate =
+      1.45 +
+      mach * 0.85 +
+      (this.flight.isBoosting ? 1.2 : 0) +
+      (this.gateWindBurstTimer > 0 ? 1.35 : 0);
 
     ctx.lineCap = 'round';
     for (let i = 0; i < activeCount; i++) {
@@ -936,10 +1155,13 @@ export class MarsFlightEngine {
       const edgeFade = Math.min(1, (outerR - 0.48) * 3.0);
       const alpha = s.alpha * edgeFade * (0.24 + intensity * 0.56);
 
-      ctx.strokeStyle = this.flight.isBoosting
-        ? `rgba(216, 246, 255, ${alpha.toFixed(3)})`
-        : `rgba(255, 245, 236, ${alpha.toFixed(3)})`;
-      ctx.lineWidth = this.flight.isBoosting ? 1.85 : 1.35;
+      ctx.strokeStyle =
+        this.gateWindBurstTimer > 0
+          ? `rgba(195, 252, 255, ${Math.min(0.95, alpha * 1.2).toFixed(3)})`
+          : this.flight.isBoosting
+            ? `rgba(216, 246, 255, ${alpha.toFixed(3)})`
+            : `rgba(255, 245, 236, ${alpha.toFixed(3)})`;
+      ctx.lineWidth = this.flight.isBoosting || this.gateWindBurstTimer > 0 ? 1.9 : 1.35;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -965,10 +1187,17 @@ export class MarsFlightEngine {
       nearMissCount: this.flight.nearMissCount,
       boostCharge: this.flight.boostCharge,
       isBoosting: this.flight.isBoosting,
+      boostOverheated: this.flight.boostLockout,
       speedIntensity: intensity,
       autoplayActive: this.autoplayActive,
       zoneId: zone.id,
       zoneName: zone.name,
+      gateStreak: this.flight.gateStreak,
+      gateMultiplier: 1 + this.flight.gateStreak,
+      gatesPassed: this.flight.gatesPassed,
+      cameraView: this.cameraView,
+      roll: this.flight.roll,
+      pitch: this.flight.pitch,
     });
   }
 
@@ -989,6 +1218,7 @@ export class MarsFlightEngine {
       bestMach: Number(this.bestMach.toFixed(2)),
       distance: Math.round(this.flight.distance),
       nearMissCount: this.flight.nearMissCount,
+      gatesPassed: this.flight.gatesPassed,
       survivalSeconds: Math.round(this.flight.survivalSeconds),
       isNewBestScore,
       isNewBestMach,
@@ -1059,7 +1289,31 @@ export class MarsFlightEngine {
         if (events.boostStarted) {
           this.audio.playBoostIgnite();
           this.spacecraft.triggerShockwave(0.65);
-          this.shockwaveFovKick = Math.max(this.shockwaveFovKick, 4.5);
+          this.shockwaveFovKick = Math.max(this.shockwaveFovKick, 4.8);
+        }
+
+        if (events.boostOverheated) {
+          this.audio.playBoostOverheat();
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.22);
+          this.emitTelemetryNow();
+        }
+
+        if (events.gatePassed) {
+          const gp = events.gatePassed;
+          this.world.triggerGatePass(gp.gateId);
+          this.world.spawnGateSparks(gp.x, gp.y, gp.z);
+          this.audio.playSpeedGate(gp.multiplier - 1);
+          this.gateWindBurstTimer = 1.35;
+          this.nearMissFovKick = Math.max(this.nearMissFovKick, 6.8);
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.25);
+          this.callbacks.onGateFlash();
+          this.callbacks.onBanner({
+            id: this.bannerSeq++,
+            kind: 'gate',
+            label: `SPEED GATE x${gp.multiplier}`,
+            sublabel: `+${gp.bonusScore} · +${Math.round(gp.boostRefill * 100)}% BOOST`,
+          });
+          this.emitTelemetryNow();
         }
 
         if (events.scrape) {

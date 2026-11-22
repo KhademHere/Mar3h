@@ -4,7 +4,13 @@ import { GameOverModal, PauseModal } from './components/StatusModal';
 import { TitleOverlay } from './components/TitleOverlay';
 import { MarsFlightEngine } from './game/MarsFlightEngine';
 import { START_MACH } from './game/simulation';
-import type { FlightTelemetry, GamePhase, HudBannerEvent, RunSummary } from './game/types';
+import type {
+  CameraViewMode,
+  FlightTelemetry,
+  GamePhase,
+  HudBannerEvent,
+  RunSummary,
+} from './game/types';
 
 const INITIAL_TELEMETRY: FlightTelemetry = {
   mach: START_MACH,
@@ -17,10 +23,17 @@ const INITIAL_TELEMETRY: FlightTelemetry = {
   nearMissCount: 0,
   boostCharge: 1,
   isBoosting: false,
+  boostOverheated: false,
   speedIntensity: 0,
   autoplayActive: false,
   zoneId: 'plains',
   zoneName: 'Wide Open Red Plains',
+  gateStreak: 0,
+  gateMultiplier: 1,
+  gatesPassed: 0,
+  cameraView: 'chase',
+  roll: 0,
+  pitch: 0,
 };
 
 export default function App() {
@@ -30,13 +43,16 @@ export default function App() {
   const bannerTimerRef = useRef<number | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const scrapeTimerRef = useRef<number | null>(null);
+  const gateFlashTimerRef = useRef<number | null>(null);
 
   const [phase, setPhase] = useState<GamePhase>('title');
   const [telemetry, setTelemetry] = useState<FlightTelemetry>(INITIAL_TELEMETRY);
   const [banner, setBanner] = useState<HudBannerEvent | null>(null);
   const [nearMissFlash, setNearMissFlash] = useState(false);
   const [scrapeFlash, setScrapeFlash] = useState(false);
+  const [gateFlash, setGateFlash] = useState(false);
   const [autoplayActive, setAutoplayActive] = useState(false);
+  const [cameraView, setCameraView] = useState<CameraViewMode>('chase');
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [muted, setMuted] = useState(false);
 
@@ -59,6 +75,7 @@ export default function App() {
             setBanner(null);
             setNearMissFlash(false);
             setScrapeFlash(false);
+            setGateFlash(false);
           }
         },
         onTelemetry: (nextTelemetry) => {
@@ -67,12 +84,11 @@ export default function App() {
         onBanner: (ev) => {
           setBanner(ev);
           if (bannerTimerRef.current !== null) window.clearTimeout(bannerTimerRef.current);
-          bannerTimerRef.current = window.setTimeout(
-            () => {
-              setBanner(null);
-            },
-            ev.kind === 'zone' ? 2200 : 1250,
-          );
+          const duration =
+            ev.kind === 'zone' ? 2200 : ev.kind === 'camera' ? 1500 : 1250;
+          bannerTimerRef.current = window.setTimeout(() => {
+            setBanner(null);
+          }, duration);
         },
         onNearMissFlash: () => {
           setNearMissFlash(true);
@@ -88,8 +104,18 @@ export default function App() {
             setScrapeFlash(false);
           }, 300);
         },
+        onGateFlash: () => {
+          setGateFlash(true);
+          if (gateFlashTimerRef.current !== null) window.clearTimeout(gateFlashTimerRef.current);
+          gateFlashTimerRef.current = window.setTimeout(() => {
+            setGateFlash(false);
+          }, 300);
+        },
         onAutoplayChange: (active) => {
           setAutoplayActive(active);
+        },
+        onCameraViewChange: (view) => {
+          setCameraView(view);
         },
         onGameOver: (runSummary) => {
           setSummary(runSummary);
@@ -107,6 +133,7 @@ export default function App() {
       if (bannerTimerRef.current !== null) window.clearTimeout(bannerTimerRef.current);
       if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
       if (scrapeTimerRef.current !== null) window.clearTimeout(scrapeTimerRef.current);
+      if (gateFlashTimerRef.current !== null) window.clearTimeout(gateFlashTimerRef.current);
       engine.dispose();
       engineRef.current = null;
     };
@@ -122,6 +149,10 @@ export default function App() {
 
   const handleToggleAutoplay = useCallback(() => {
     engineRef.current?.toggleAutoplay();
+  }, []);
+
+  const handleCycleCamera = useCallback(() => {
+    engineRef.current?.cycleCameraView();
   }, []);
 
   const handlePause = useCallback(() => {
@@ -182,11 +213,14 @@ export default function App() {
           banner={banner}
           nearMissFlash={nearMissFlash}
           scrapeFlash={scrapeFlash}
+          gateFlash={gateFlash}
           autoplayActive={autoplayActive}
+          cameraView={cameraView}
           muted={muted}
           onPause={handlePause}
           onToggleMute={handleToggleMute}
           onToggleAutoplay={handleToggleAutoplay}
+          onCycleCamera={handleCycleCamera}
           onBoostStart={handleBoostStart}
           onBoostEnd={handleBoostEnd}
         />

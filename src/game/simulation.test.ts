@@ -8,11 +8,13 @@ import {
   getCanyonHalfWidth,
   getDustDevilX,
   getObstaclesForChunk,
+  getSpeedGatesForChunk,
   getTerrainHeight,
   getZoneInfoAtZ,
   isBreatherChunk,
 } from './terrainMath';
 import {
+  BOOST_OVERHEAT_RECOVERY_THRESHOLD,
   MAX_ALTITUDE,
   createInitialFlightState,
   evaluateObstacleClearance,
@@ -289,11 +291,167 @@ test('distinct 4 Martian zones cycle smoothly with periodic open-sky breather st
   assert.ok(ZONE_LENGTH >= 5500 && ZONE_LENGTH <= 7500, 'Each zone should span ~30-40s of supersonic flight');
 });
 
-test('Autoplay cleanly navigates all 4 Martian zones and every new obstacle type for 140s without crashing', () => {
+test('all Glowing Speed Gates across all 4 Martian zones are safely inside canyon walls and clear of solid obstacles', () => {
+  let totalGates = 0;
+  let flowCount = 0;
+  let bonusCount = 0;
+
+  for (let c = 0; c < CHUNKS_PER_ZONE * 4; c++) {
+    const gates = getSpeedGatesForChunk(c);
+    const obstacles = getObstaclesForChunk(c);
+    for (const gate of gates) {
+      totalGates++;
+      if (gate.tier === 'flow') flowCount++;
+      else bonusCount++;
+
+      const cx = getCanyonCenterX(gate.z);
+      const hw = getCanyonHalfWidth(gate.z);
+      const wallOffset = Math.abs(gate.x - cx);
+      assert.ok(
+        wallOffset <= hw - gate.radius - 2,
+        `Gate ${gate.id} too close to canyon wall: offset=${wallOffset.toFixed(1)}, hw=${hw.toFixed(1)}`,
+      );
+
+      const groundY = getTerrainHeight(gate.x, gate.z);
+      assert.ok(
+        gate.y >= groundY + 8,
+        `Gate ${gate.id} too close to Martian terrain: y=${gate.y.toFixed(1)}, ground=${groundY.toFixed(1)}`,
+      );
+      assert.ok(gate.y <= MAX_ALTITUDE - 12, `Gate ${gate.id} above comfortable flight ceiling`);
+      assert.ok(
+        Math.abs(gate.yaw) < 0.55,
+        `Gate ${gate.id} must face the approaching flight path, got yaw=${gate.yaw.toFixed(2)} rad`,
+      );
+
+      for (const obs of obstacles) {
+        if (obs.kind === 'dust-devil') continue;
+        const clearance = evaluateObstacleClearance(gate.x, gate.y, gate.z, obs, 1.15);
+        assert.ok(
+          clearance > 4.0,
+          `Gate ${gate.id} conflicts with obstacle ${obs.id} (${obs.kind}): clearance=${clearance.toFixed(1)}`,
+        );
+      }
+    }
+  }
+
+  assert.ok(totalGates >= 36, `Expected rich distribution of Speed Gates across 4 zones, got ${totalGates}`);
+  assert.ok(flowCount >= 10 && bonusCount >= 10, `Expected both flow (${flowCount}) and bonus (${bonusCount}) gates`);
+});
+
+test('passing Speed Gates stacks x2->x3 multiplier, surges Mach, refills Boost Bar, and missing resets gently to x1', () => {
+  let state = createInitialFlightState();
+  state.x = 0;
+  state.y = 22;
+  state.z = -50;
+  state.boostCharge = 0.35;
+
+  const testGates = [
+    { id: 'gate-1', x: 0, y: 22, z: -53, radius: 13, tier: 'flow' as const, yaw: 0 },
+    { id: 'gate-2', x: 0, y: 22, z: -60, radius: 13, tier: 'bonus' as const, yaw: 0 },
+    { id: 'gate-3-miss', x: 42, y: 22, z: -68, radius: 13, tier: 'bonus' as const, yaw: 0 },
+  ];
+
+  const machBefore = state.mach;
+  let hit1 = false;
+  let hit2 = false;
+  let missed3 = false;
+  let maxMult = 1;
+  let boostAfterHit1 = 0;
+
+  for (let i = 0; i < 45; i++) {
+    const res = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: testGates,
+    });
+    state = res.state;
+    if (res.events.gatePassed?.gateId === 'gate-1') {
+      hit1 = true;
+      boostAfterHit1 = state.boostCharge;
+      assert.equal(res.events.gatePassed.multiplier, 2, 'First gate should set multiplier to x2');
+    }
+    if (res.events.gatePassed?.gateId === 'gate-2') {
+      hit2 = true;
+      assert.equal(res.events.gatePassed.multiplier, 3, 'Second consecutive gate should stack to x3');
+    }
+    if (res.events.gatePassed) {
+      maxMult = Math.max(maxMult, res.events.gatePassed.multiplier);
+    }
+    if (res.events.gateMissed) {
+      missed3 = true;
+    }
+  }
+
+  assert.equal(hit1, true, 'Should cleanly pass through first Speed Gate');
+  assert.equal(hit2, true, 'Should cleanly pass through second Speed Gate');
+  assert.equal(maxMult, 3, 'Streak multiplier should stack to x3');
+  assert.ok(boostAfterHit1 >= 0.62, `Passing gate should refill Boost Bar significantly, got ${boostAfterHit1.toFixed(2)}`);
+  assert.ok(state.peakMach > machBefore + 0.5, 'Consecutive Speed Gates should grant strong Mach surge');
+  assert.equal(missed3, true, 'Passing far off-center from gate 3 should register a miss');
+  assert.equal(state.gateStreak, 0, 'Missing a Speed Gate should gently reset streak back to x1 (streak 0)');
+  assert.equal(state.gatesPassed, 2);
+});
+
+test('draining Boost Bar triggers overheat lockout and blocks re-ignition until recharged past 25%', () => {
+  let state = createInitialFlightState();
+  state.boostCharge = 0.08;
+
+  let sawOverheat = false;
+  for (let i = 0; i < 40; i++) {
+    const res = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: true }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    });
+    state = res.state;
+    if (res.events.boostOverheated) {
+      sawOverheat = true;
+      break;
+    }
+  }
+
+  assert.equal(sawOverheat, true, 'Draining Boost Bar to empty must trigger overheat event');
+  assert.equal(state.boostLockout, true, 'Overheat must activate boost lockout');
+  assert.equal(state.isBoosting, false, 'Overheat must immediately cut afterburners');
+
+  // Trying to hold boost during cooldown & below 25% must stay locked out
+  for (let i = 0; i < 60; i++) {
+    const res = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: true }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    });
+    state = res.state;
+    assert.equal(state.isBoosting, false, 'Afterburners must stay locked out during overheat cooldown');
+  }
+
+  // Let it finish cooling and recharge past BOOST_OVERHEAT_RECOVERY_THRESHOLD (25%)
+  let recovered = false;
+  for (let i = 0; i < 240; i++) {
+    const res = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: true }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    });
+    state = res.state;
+    if (state.isBoosting) {
+      assert.ok(
+        state.boostCharge >= BOOST_OVERHEAT_RECOVERY_THRESHOLD - 0.02,
+        `Re-ignition should only happen after recharging past 25%, got ${state.boostCharge.toFixed(2)}`,
+      );
+      recovered = true;
+      break;
+    }
+  }
+
+  assert.equal(recovered, true, 'Boost should re-ignite cleanly once cooldown ends and charge recovers past 25%');
+});
+
+test('Smart Autoplay navigates all 4 zones, uses strategic boost bursts without overheating, and hunts Speed Gates', () => {
   let state = createInitialFlightState();
   let maxRoll = 0;
   const visitedZones = new Set<MartianZoneId>([state.currentZoneId]);
   let zoneTransitions = 0;
+  let boostBursts = 0;
+  let boostFrames = 0;
+  let overheatCount = 0;
+  let maxMultiplier = 1;
 
   // 140 seconds at 60Hz = 8400 frames spanning all 4 Martian zones (>24 km)
   for (let i = 0; i < 8400; i++) {
@@ -305,6 +463,12 @@ test('Autoplay cleanly navigates all 4 Martian zones and every new obstacle type
     );
     state = res.state;
     if (Math.abs(state.roll) > maxRoll) maxRoll = Math.abs(state.roll);
+    if (res.events.boostStarted) boostBursts++;
+    if (state.isBoosting) boostFrames++;
+    if (res.events.boostOverheated) overheatCount++;
+    if (res.events.gatePassed) {
+      maxMultiplier = Math.max(maxMultiplier, res.events.gatePassed.multiplier);
+    }
     if (res.events.zoneChanged) {
       zoneTransitions++;
       visitedZones.add(res.events.zoneChanged.id);
@@ -318,6 +482,14 @@ test('Autoplay cleanly navigates all 4 Martian zones and every new obstacle type
 
   assert.equal(visitedZones.size, 4, `Autoplay should visit all 4 zones, visited: ${[...visitedZones].join(', ')}`);
   assert.ok(zoneTransitions >= 3, `Expected >= 3 zone transition events, got ${zoneTransitions}`);
-  assert.ok(state.peakMach >= 2.2, `Autoplay should build high Mach speeds, got peakMach=${state.peakMach.toFixed(2)}`);
+  assert.ok(state.peakMach >= 2.4, `Autoplay should reach high Mach with strategic boosts & gates, got peakMach=${state.peakMach.toFixed(2)}`);
   assert.ok(maxRoll > 0.14, 'Autoplay should bank naturally into turns');
+  assert.ok(boostBursts >= 5, `Autoplay should fire deliberate strategic boost bursts, got ${boostBursts}`);
+  assert.ok(
+    boostFrames > 400 && boostFrames < 7800,
+    `Autoplay should burst strategically rather than never or nonstop, got ${boostFrames}/8400 frames`,
+  );
+  assert.equal(overheatCount, 0, `Smart Autoplay should manage Boost Bar cleanly without overheating, got ${overheatCount}`);
+  assert.ok(state.gatesPassed >= 16, `Autoplay should actively hunt Speed Gates safely, passed ${state.gatesPassed}`);
+  assert.ok(maxMultiplier >= 3, `Autoplay should chain consecutive Speed Gates for x3+ multiplier, got x${maxMultiplier}`);
 });

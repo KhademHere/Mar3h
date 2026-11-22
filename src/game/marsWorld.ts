@@ -8,11 +8,12 @@ import {
   getCanyonHalfWidth,
   getDustDevilX,
   getObstaclesForChunk,
+  getSpeedGatesForChunk,
   getTerrainHeight,
   getValleyFloorHeight,
   getZoneWeightsAtZ,
 } from './terrainMath';
-import type { CanyonObstacle } from './types';
+import type { CanyonObstacle, SpeedGate } from './types';
 
 const CHUNK_COUNT = 6;
 const SEGMENTS_X = 46;
@@ -29,12 +30,25 @@ interface LiveDustDevil {
   rings: THREE.Mesh[];
 }
 
+interface LiveSpeedGate {
+  gate: SpeedGate;
+  group: THREE.Group;
+  outerSpinner: THREE.Group;
+  innerSpinner: THREE.Group;
+  rippleRing: THREE.Mesh;
+  rippleMat: THREE.MeshBasicMaterial;
+  outerRingMat: THREE.MeshBasicMaterial;
+  passed: boolean;
+  rippleProgress: number; // 0..1 when triggered
+}
+
 interface TerrainChunk {
   index: number;
   mesh: THREE.Mesh;
   geometry: THREE.BufferGeometry;
   obstacleGroup: THREE.Group;
   dustDevils: LiveDustDevil[];
+  speedGates: LiveSpeedGate[];
 }
 
 interface BurstParticle {
@@ -55,6 +69,8 @@ export interface MarsWorldRig {
   group: THREE.Group;
   update: (dt: number, craftX: number, craftY: number, craftZ: number, worldTime: number) => void;
   getZoneFogColor: (z: number, outColor: THREE.Color) => THREE.Color;
+  triggerGatePass: (gateId: string) => void;
+  spawnGateSparks: (x: number, y: number, z: number) => void;
   spawnCrashExplosion: (x: number, y: number, z: number) => void;
   spawnNearMissSparks: (x: number, y: number, z: number) => void;
   spawnScrapeSparks: (x: number, y: number, z: number) => void;
@@ -743,6 +759,113 @@ function createDustDevilGroup(
 }
 
 /**
+ * 9. Luminous Cyan-and-Gold Holographic Speed Gate floating above the Martian canyon
+ * with rotating segmented light arcs, soft energy halo, and expanding pass-through ripple!
+ */
+function createSpeedGateGroup(
+  gate: SpeedGate,
+  materials: MarsMaterialLibrary,
+): LiveSpeedGate {
+  const g = new THREE.Group();
+  g.position.set(gate.x, gate.y, gate.z);
+  g.rotation.y = gate.yaw;
+
+  const isBonus = gate.tier === 'bonus';
+  const r = gate.radius;
+
+  // Primary luminous holographic cyan ring (NormalBlending keeps vivid electric cyan against orange Mars sky)
+  const outerGeo = new THREE.TorusGeometry(r, 0.42, 12, 48);
+  const outerRingMat = new THREE.MeshBasicMaterial({
+    color: isBonus ? 0x38f2ff : 0x22d3ee,
+    transparent: true,
+    opacity: 0.94,
+    depthWrite: false,
+  });
+  g.add(new THREE.Mesh(outerGeo, outerRingMat));
+
+  // Soft wide outer cyan glow aura torus so gates read unmistakably from 400m against rusty red cliffs
+  const haloGeo = new THREE.TorusGeometry(r, 1.05, 8, 40);
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0x38e8ff,
+    transparent: true,
+    opacity: 0.28,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  g.add(new THREE.Mesh(haloGeo, haloMat));
+
+  // Rotating outer holographic gold light arc segments orbiting the cyan ring
+  const outerSpinner = new THREE.Group();
+  const arcMatGold = new THREE.MeshBasicMaterial({
+    color: isBonus ? 0xffd54a : 0xfbbf24,
+    transparent: true,
+    opacity: 0.96,
+    depthWrite: false,
+  });
+  for (let i = 0; i < 4; i++) {
+    const segGeo = new THREE.TorusGeometry(r * 1.11, 0.34, 8, 16, Math.PI * 0.3);
+    const seg = new THREE.Mesh(segGeo, arcMatGold);
+    seg.rotation.z = (i * Math.PI) / 2;
+    outerSpinner.add(seg);
+  }
+  g.add(outerSpinner);
+
+  // Counter-rotating inner electric ice-cyan light segments
+  const innerSpinner = new THREE.Group();
+  const arcMatCyan = new THREE.MeshBasicMaterial({
+    color: 0xbef8ff,
+    transparent: true,
+    opacity: 0.88,
+    depthWrite: false,
+  });
+  for (let i = 0; i < 3; i++) {
+    const innerArcGeo = new THREE.TorusGeometry(r * 0.86, 0.2, 6, 14, Math.PI * 0.34);
+    const innerSeg = new THREE.Mesh(innerArcGeo, arcMatCyan);
+    innerSeg.rotation.z = (i * Math.PI * 2) / 3;
+    innerSpinner.add(innerSeg);
+  }
+  g.add(innerSpinner);
+
+  // Subtle translucent holographic field sheen inside the ring
+  const glowSpriteMat = new THREE.SpriteMaterial({
+    map: materials.glowTexture,
+    color: isBonus ? 0x67e8f9 : 0x38bdf8,
+    transparent: true,
+    opacity: 0.2,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const glowSprite = new THREE.Sprite(glowSpriteMat);
+  glowSprite.scale.set(r * 2.4, r * 2.4, 1);
+  g.add(glowSprite);
+
+  // Expanding pass-through energy ripple ring (activates when aircraft blasts through!)
+  const rippleGeo = new THREE.TorusGeometry(r, 0.6, 8, 44);
+  const rippleMat = new THREE.MeshBasicMaterial({
+    color: 0xa5f3fc,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const rippleRing = new THREE.Mesh(rippleGeo, rippleMat);
+  rippleRing.visible = false;
+  g.add(rippleRing);
+
+  return {
+    gate,
+    group: g,
+    outerSpinner,
+    innerSpinner,
+    rippleRing,
+    rippleMat,
+    outerRingMat,
+    passed: false,
+    rippleProgress: 0,
+  };
+}
+
+/**
  * Custom Martian atmospheric sky dome shader with dynamic zone-blended sky colors,
  * bright distant sun with halo, and warm ground-haze band.
  */
@@ -860,12 +983,29 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
 
   const clearChunkObstacles = (chunk: TerrainChunk) => {
     chunk.dustDevils.length = 0;
+    chunk.speedGates.length = 0;
     while (chunk.obstacleGroup.children.length > 0) {
       const child = chunk.obstacleGroup.children[0];
       chunk.obstacleGroup.remove(child);
       child.traverse((obj) => {
         if ((obj as THREE.Mesh).isMesh) {
-          (obj as THREE.Mesh).geometry.dispose();
+          const mesh = obj as THREE.Mesh;
+          mesh.geometry.dispose();
+          // Dispose per-gate additive materials (shared library materials stay alive)
+          const mat = mesh.material as THREE.Material;
+          if (
+            mat !== materials.rockObstacleMaterial &&
+            mat !== materials.rustedSteelMaterial &&
+            mat !== materials.concreteMaterial &&
+            mat !== materials.solarPanelMaterial &&
+            mat !== materials.beaconMaterial &&
+            mat !== materials.metalIntakeMaterial &&
+            mat !== materials.dustDevilMaterial
+          ) {
+            mat.dispose();
+          }
+        } else if ((obj as THREE.Sprite).isSprite) {
+          (obj as THREE.Sprite).material.dispose();
         }
       });
     }
@@ -936,6 +1076,14 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
         chunk.obstacleGroup.add(spireMesh);
       }
     }
+
+    // Spawn luminous Glowing Speed Gates for this chunk
+    const gates = getSpeedGatesForChunk(chunkIndex);
+    for (let i = 0; i < gates.length; i++) {
+      const liveGate = createSpeedGateGroup(gates[i], materials);
+      chunk.obstacleGroup.add(liveGate.group);
+      chunk.speedGates.push(liveGate);
+    }
   };
 
   // Pre-build 6 reusable terrain chunk meshes (counter-clockwise upward-facing winding for +X / -Z grid)
@@ -982,6 +1130,7 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
       geometry: geo,
       obstacleGroup,
       dustDevils: [],
+      speedGates: [],
     });
   }
 
@@ -1113,6 +1262,42 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
   return {
     group,
     getZoneFogColor: (z, outColor) => blendZoneColor(z, 'fog', outColor),
+    triggerGatePass: (gateId) => {
+      for (let c = 0; c < chunks.length; c++) {
+        const gates = chunks[c].speedGates;
+        for (let g = 0; g < gates.length; g++) {
+          const lg = gates[g];
+          if (lg.gate.id === gateId) {
+            lg.passed = true;
+            lg.rippleProgress = 0.001;
+            lg.rippleRing.visible = true;
+            lg.rippleRing.scale.set(1, 1, 1);
+            lg.rippleMat.opacity = 1.0;
+            lg.outerRingMat.color.setHex(0xffffff);
+            return;
+          }
+        }
+      }
+    },
+    spawnGateSparks: (x, y, z) => {
+      const palette = [0xffffff, 0x67e8f9, 0xfde047, 0x38bdf8];
+      for (let i = 0; i < 28; i++) {
+        const angle = (i / 28) * Math.PI * 2 + Math.random() * 0.2;
+        const radialSpd = 18 + Math.random() * 28;
+        emitParticle(
+          x + Math.cos(angle) * 3.5,
+          y + Math.sin(angle) * 3.5,
+          z,
+          Math.cos(angle) * radialSpd,
+          Math.sin(angle) * radialSpd,
+          16 + Math.random() * 34,
+          0.32 + Math.random() * 0.3,
+          0.45 + Math.random() * 0.65,
+          palette[i % palette.length],
+        );
+      }
+      if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
+    },
     reset: () => {
       resetChunks();
     },
@@ -1198,6 +1383,25 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
           dd.group.position.x = getDustDevilX(dd.obs, worldTime);
           for (let r = 0; r < dd.rings.length; r++) {
             dd.rings[r].rotation.y += dt * (3.2 + r * 0.55) * (r % 2 === 0 ? 1 : -1);
+          }
+        }
+
+        // Animate holographic rotating Speed Gate segments & pass-through flash ripples
+        for (let g = 0; g < ch.speedGates.length; g++) {
+          const lg = ch.speedGates[g];
+          lg.outerSpinner.rotation.z += dt * (lg.passed ? 4.2 : 1.05);
+          lg.innerSpinner.rotation.z -= dt * (lg.passed ? 5.6 : 1.65);
+
+          if (lg.rippleProgress > 0 && lg.rippleProgress < 1) {
+            lg.rippleProgress = Math.min(1, lg.rippleProgress + dt * 2.4);
+            const ease = 1 - Math.pow(1 - lg.rippleProgress, 2.5);
+            const s = 1 + ease * 1.45;
+            lg.rippleRing.scale.set(s, s, 1);
+            lg.rippleMat.opacity = (1 - lg.rippleProgress) * 0.95;
+            lg.outerRingMat.opacity = Math.max(0.22, 0.95 - lg.rippleProgress * 0.72);
+            if (lg.rippleProgress >= 1) {
+              lg.rippleRing.visible = false;
+            }
           }
         }
       }

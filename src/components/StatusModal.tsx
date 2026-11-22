@@ -117,14 +117,14 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
           </div>
 
           <div>
-            <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#fcd34d] uppercase">
-              Near Miss
+            <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#67e8f9] uppercase">
+              Speed Gates
             </div>
             <div className="font-telemetry mt-1 text-2xl sm:text-3xl font-bold text-[#fff6ee]">
-              {summary.nearMissCount}
+              {summary.gatesPassed}
             </div>
             <div className="font-telemetry mt-0.5 text-[11px] text-[#f5cbb0]/70">
-              Canyon skims
+              {summary.nearMissCount} canyon skims
             </div>
           </div>
         </div>
