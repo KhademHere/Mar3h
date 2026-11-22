@@ -13,7 +13,7 @@ import {
   getValleyFloorHeight,
   getZoneWeightsAtZ,
 } from './terrainMath';
-import type { CanyonObstacle, SpeedGate } from './types';
+import type { CanyonObstacle, DifficultyId, SpeedGate } from './types';
 
 const CHUNK_COUNT = 6;
 const SEGMENTS_X = 46;
@@ -67,6 +67,7 @@ interface BurstParticle {
 
 export interface MarsWorldRig {
   group: THREE.Group;
+  setDifficulty: (difficulty: DifficultyId) => void;
   update: (dt: number, craftX: number, craftY: number, craftZ: number, worldTime: number) => void;
   getZoneFogColor: (z: number, outColor: THREE.Color) => THREE.Color;
   triggerGatePass: (gateId: string) => void;
@@ -74,7 +75,7 @@ export interface MarsWorldRig {
   spawnCrashExplosion: (x: number, y: number, z: number) => void;
   spawnNearMissSparks: (x: number, y: number, z: number) => void;
   spawnScrapeSparks: (x: number, y: number, z: number) => void;
-  reset: () => void;
+  reset: (difficulty?: DifficultyId) => void;
   dispose: () => void;
 }
 
@@ -104,6 +105,14 @@ const ZONE_PALETTES = {
     horizon: new THREE.Color('#c94e26'),
     fog: new THREE.Color('#9c381c'),
   },
+};
+
+// Intense crimson dust-storm lighting overlay for HARD mode
+const HARD_CRIMSON_PALETTE = {
+  zenith: new THREE.Color('#22040a'),
+  mid: new THREE.Color('#7f131b'),
+  horizon: new THREE.Color('#d92c28'),
+  fog: new THREE.Color('#a61d1c'),
 };
 
 /**
@@ -958,6 +967,8 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
   const chunks: TerrainChunk[] = [];
   const tmpColor = new THREE.Color();
 
+  let activeDifficulty: DifficultyId = 'easy';
+
   const blendZoneColor = (
     z: number,
     key: 'zenith' | 'mid' | 'horizon' | 'fog',
@@ -978,6 +989,11 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
         ZONE_PALETTES.colony[key].b * w.colony +
         ZONE_PALETTES.volcanic[key].b * w.volcanic,
     );
+    if (activeDifficulty === 'hard') {
+      out.lerp(HARD_CRIMSON_PALETTE[key], 0.56);
+    } else if (activeDifficulty === 'medium') {
+      out.lerp(HARD_CRIMSON_PALETTE[key], 0.16);
+    }
     return out;
   };
 
@@ -1021,13 +1037,13 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
     for (let iz = 0; iz <= SEGMENTS_Z; iz++) {
       const zFrac = iz / SEGMENTS_Z;
       const worldZ = zStart - zFrac * CHUNK_LENGTH;
-      const centerX = getCanyonCenterX(worldZ);
+      const centerX = getCanyonCenterX(worldZ, activeDifficulty);
 
       for (let ix = 0; ix <= SEGMENTS_X; ix++) {
         const xFrac = ix / SEGMENTS_X - 0.5;
         const shapedX = Math.sign(xFrac) * Math.pow(Math.abs(xFrac) * 2, 1.18) * 0.5;
         const worldX = centerX + shapedX * TERRAIN_WIDTH;
-        const worldY = getTerrainHeight(worldX, worldZ);
+        const worldY = getTerrainHeight(worldX, worldZ, activeDifficulty);
 
         posAttr.setXYZ(vIdx, worldX, worldY, worldZ);
         sampleMarsRockColor(worldX, worldY, worldZ, tmpColor);
@@ -1043,7 +1059,7 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
 
     // Rebuild varied handcrafted landmarks & hazards for this chunk
     clearChunkObstacles(chunk);
-    const obstacles = getObstaclesForChunk(chunkIndex);
+    const obstacles = getObstaclesForChunk(chunkIndex, activeDifficulty);
     for (let i = 0; i < obstacles.length; i++) {
       const obs = obstacles[i];
       const seed = chunkIndex * 11.3 + i * 3.7;
@@ -1078,7 +1094,7 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
     }
 
     // Spawn luminous Glowing Speed Gates for this chunk
-    const gates = getSpeedGatesForChunk(chunkIndex);
+    const gates = getSpeedGatesForChunk(chunkIndex, activeDifficulty);
     for (let i = 0; i < gates.length; i++) {
       const liveGate = createSpeedGateGroup(gates[i], materials);
       chunk.obstacleGroup.add(liveGate.group);
@@ -1162,11 +1178,13 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
   group.add(dustGroup);
 
   const initDustAround = (craftZ: number) => {
+    dustMat.color.setHex(activeDifficulty === 'hard' ? 0xff705a : 0xffffff);
+    dustMat.opacity = activeDifficulty === 'hard' ? 0.56 : 0.44;
     for (let i = 0; i < dustClouds.length; i++) {
       const dc = dustClouds[i];
       const dz = craftZ - (i / dustClouds.length) * 680 + 30;
-      const cx = getCanyonCenterX(dz);
-      const hw = getCanyonHalfWidth(dz);
+      const cx = getCanyonCenterX(dz, activeDifficulty);
+      const hw = getCanyonHalfWidth(dz, activeDifficulty);
       const x = cx + dc.offsetX * hw * 0.85;
       const y = getValleyFloorHeight(x, dz) + 4.5 + (i % 3) * 3.2;
       dc.sprite.position.set(x, y, dz);
@@ -1262,6 +1280,15 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
   return {
     group,
     getZoneFogColor: (z, outColor) => blendZoneColor(z, 'fog', outColor),
+    setDifficulty: (difficulty) => {
+      if (activeDifficulty === difficulty) return;
+      activeDifficulty = difficulty;
+      resetChunks();
+      blendZoneColor(0, 'zenith', sky.uniforms.uZenithColor.value);
+      blendZoneColor(0, 'mid', sky.uniforms.uMidSkyColor.value);
+      blendZoneColor(0, 'horizon', sky.uniforms.uHorizonColor.value);
+      blendZoneColor(0, 'fog', sky.uniforms.uGroundHazeColor.value);
+    },
     triggerGatePass: (gateId) => {
       for (let c = 0; c < chunks.length; c++) {
         const gates = chunks[c].speedGates;
@@ -1298,8 +1325,15 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
       }
       if (particleMesh.instanceColor) particleMesh.instanceColor.needsUpdate = true;
     },
-    reset: () => {
+    reset: (difficulty) => {
+      if (difficulty) {
+        activeDifficulty = difficulty;
+      }
       resetChunks();
+      blendZoneColor(0, 'zenith', sky.uniforms.uZenithColor.value);
+      blendZoneColor(0, 'mid', sky.uniforms.uMidSkyColor.value);
+      blendZoneColor(0, 'horizon', sky.uniforms.uHorizonColor.value);
+      blendZoneColor(0, 'fog', sky.uniforms.uGroundHazeColor.value);
     },
     spawnCrashExplosion: (x, y, z) => {
       const palette = [0xfff3c4, 0xff9a3c, 0xff521b, 0x7dd3fc];
@@ -1414,8 +1448,8 @@ export function createMarsWorldRig(materials: MarsMaterialLibrary): MarsWorldRig
         sp.position.x += Math.sin(dustClock * 0.7 + dc.phase) * dc.driftSpeed * dt;
         if (sp.position.z > craftZ + 55) {
           const newZ = craftZ - 610 - Math.random() * 140;
-          const cx = getCanyonCenterX(newZ);
-          const hw = getCanyonHalfWidth(newZ);
+          const cx = getCanyonCenterX(newZ, activeDifficulty);
+          const hw = getCanyonHalfWidth(newZ, activeDifficulty);
           const newX = cx + dc.offsetX * hw * 0.85;
           sp.position.set(newX, getValleyFloorHeight(newX, newZ) + 4.5 + (i % 3) * 3.5, newZ);
         }

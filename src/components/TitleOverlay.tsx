@@ -1,31 +1,70 @@
 import React from 'react';
+import { DIFFICULTY_CONFIGS, DIFFICULTY_ORDER } from '../game/difficulty';
+import type { AllDifficultyRecords, DifficultyId } from '../game/types';
 
 interface TitleOverlayProps {
-  bestScore: number;
-  bestMach: number;
+  difficulty: DifficultyId;
+  records: AllDifficultyRecords;
   muted: boolean;
+  onSelectDifficulty: (difficulty: DifficultyId) => void;
   onStart: () => void;
   onStartAutoplay: () => void;
   onToggleMute: () => void;
 }
 
+const DIFFICULTY_CARD_STYLES: Record<
+  DifficultyId,
+  {
+    activeBorder: string;
+    activeBg: string;
+    activeShadow: string;
+    labelColor: string;
+    accentBar: string;
+  }
+> = {
+  easy: {
+    activeBorder: 'border-[#38bdf8]',
+    activeBg: 'bg-[#082534]/92',
+    activeShadow: 'shadow-[0_0_24px_rgba(56,189,248,0.45)]',
+    labelColor: 'text-[#67e8f9]',
+    accentBar: 'bg-[#38bdf8]',
+  },
+  medium: {
+    activeBorder: 'border-[#fbbf24]',
+    activeBg: 'bg-[#331a06]/92',
+    activeShadow: 'shadow-[0_0_24px_rgba(251,191,36,0.45)]',
+    labelColor: 'text-[#fcd34d]',
+    accentBar: 'bg-[#f59e0b]',
+  },
+  hard: {
+    activeBorder: 'border-[#fb4b5c]',
+    activeBg: 'bg-[#380b10]/94',
+    activeShadow: 'shadow-[0_0_26px_rgba(244,63,94,0.52)]',
+    labelColor: 'text-[#fda4af]',
+    accentBar: 'bg-[#f43f5e]',
+  },
+};
+
 export const TitleOverlay: React.FC<TitleOverlayProps> = ({
-  bestScore,
-  bestMach,
+  difficulty,
+  records,
   muted,
+  onSelectDifficulty,
   onStart,
   onStartAutoplay,
   onToggleMute,
 }) => {
+  const activeRecord = records[difficulty];
+
   return (
     <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-6 sm:p-10">
-      {/* Top row: subtle audio toggle in top-right */}
-      <div className="flex items-start justify-between">
-        <div className="max-w-xl pt-2 sm:pt-4">
+      {/* Top row: Title lockup, 3-tier glowing difficulty selector, Launch CTA, and subtle audio toggle */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="max-w-2xl pt-1 sm:pt-3">
           {/* Bespoke inline SVG supersonic title lockup positioned over calm upper Martian sky */}
           <svg
             viewBox="0 0 540 132"
-            className="w-[300px] sm:w-[440px] md:w-[500px] h-auto drop-shadow-[0_6px_18px_rgba(22,6,3,0.75)]"
+            className="w-[290px] sm:w-[420px] md:w-[470px] h-auto drop-shadow-[0_6px_18px_rgba(22,6,3,0.75)]"
             role="img"
             aria-label="Ares Mach"
           >
@@ -38,10 +77,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
                 strokeWidth="3"
                 strokeLinejoin="miter"
               />
-              <polygon
-                points="46,28 60,64 46,54 32,64"
-                fill="#38bdf8"
-              />
+              <polygon points="46,28 60,64 46,54 32,64" fill="#38bdf8" />
               <line
                 x1="46"
                 y1="62"
@@ -95,8 +131,61 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
             </text>
           </svg>
 
-          {/* Primary Start CTA + One-Click Autoplay launch + optional personal record */}
-          <div className="mt-6 flex flex-wrap items-center gap-3.5 pl-2">
+          {/* 3-Tier Glowing Difficulty Selector right above Launch button */}
+          <div
+            role="radiogroup"
+            aria-label="Flight difficulty"
+            className="mt-5 grid max-w-[600px] grid-cols-3 gap-2.5 pl-2"
+          >
+            {DIFFICULTY_ORDER.map((id) => {
+              const cfg = DIFFICULTY_CONFIGS[id];
+              const style = DIFFICULTY_CARD_STYLES[id];
+              const selected = difficulty === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`difficulty-${id}`}
+                  onClick={() => onSelectDifficulty(id)}
+                  className={`pointer-events-auto group relative flex flex-col items-start overflow-hidden rounded-sm border px-3 py-2.5 text-left transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#7dd3fc] cursor-pointer ${
+                    selected
+                      ? `${style.activeBorder} ${style.activeBg} ${style.activeShadow} scale-[1.015]`
+                      : 'border-[#ffd8bc]/22 bg-[#170805]/80 hover:border-[#ffd8bc]/50 hover:bg-[#230d08]/90'
+                  }`}
+                >
+                  {/* Top glowing accent bar */}
+                  <span
+                    aria-hidden="true"
+                    className={`absolute inset-x-0 top-0 h-[3px] transition-opacity duration-150 ${style.accentBar} ${
+                      selected ? 'opacity-100' : 'opacity-35 group-hover:opacity-70'
+                    }`}
+                  />
+                  <div className="flex w-full items-center justify-between gap-1.5">
+                    <span
+                      className={`font-display text-sm sm:text-base font-bold tracking-[0.14em] uppercase ${
+                        selected ? style.labelColor : 'text-[#fff1e6]/90'
+                      }`}
+                    >
+                      {cfg.label}
+                    </span>
+                    <span className="font-telemetry text-[10px] font-semibold text-[#f5cbb0]/75">
+                      {cfg.scoreRateMultiplier % 1 === 0
+                        ? `${cfg.scoreRateMultiplier}.0x`
+                        : `${cfg.scoreRateMultiplier}x`}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] sm:text-xs leading-snug text-[#f7d8c2]/88">
+                    {cfg.preview}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Primary Start CTA + One-Click Autoplay launch + selected tier personal record */}
+          <div className="mt-4 flex flex-wrap items-center gap-3.5 pl-2">
             <button
               type="button"
               data-start="true"
@@ -131,11 +220,19 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
               <span>Autoplay</span>
             </button>
 
-            {bestScore > 0 && (
-              <div className="hud-text-shadow font-telemetry flex items-center gap-2.5 pl-1 text-sm font-medium text-[#ffead8]">
-                <span>Best Mach {bestMach.toFixed(1)}</span>
+            {(activeRecord.bestDistance > 0 || activeRecord.bestScore > 0) && (
+              <div className="hud-text-shadow font-telemetry flex items-center gap-2.5 pl-1 text-xs sm:text-sm font-medium text-[#ffead8]">
+                <span className={DIFFICULTY_CARD_STYLES[difficulty].labelColor}>
+                  {DIFFICULTY_CONFIGS[difficulty].label} BEST
+                </span>
                 <span aria-hidden="true" className="text-[#fb923c]">·</span>
-                <span>{bestScore.toLocaleString()} pts</span>
+                <span>Mach {activeRecord.bestMach.toFixed(1)}</span>
+                {activeRecord.bestDistance > 0 && (
+                  <>
+                    <span aria-hidden="true" className="text-[#fb923c]">·</span>
+                    <span>{activeRecord.bestDistance.toLocaleString()}m</span>
+                  </>
+                )}
               </div>
             )}
           </div>

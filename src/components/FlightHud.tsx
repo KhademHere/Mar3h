@@ -1,5 +1,6 @@
 import React from 'react';
-import type { CameraViewMode, FlightTelemetry, HudBannerEvent } from '../game/types';
+import { DIFFICULTY_CONFIGS } from '../game/difficulty';
+import type { CameraViewMode, DifficultyId, FlightTelemetry, HudBannerEvent } from '../game/types';
 
 interface FlightHudProps {
   telemetry: FlightTelemetry;
@@ -23,6 +24,12 @@ const CAMERA_BUTTON_SHORT: Record<CameraViewMode, string> = {
   cockpit: 'Cockpit',
   wing: 'Wing',
   cinematic: 'Flyby',
+};
+
+const DIFFICULTY_BADGE_STYLES: Record<DifficultyId, string> = {
+  easy: 'border-[#38bdf8]/60 bg-[#0b3145]/85 text-[#7dd3fc]',
+  medium: 'border-[#fbbf24]/65 bg-[#3b2007]/88 text-[#fcd34d]',
+  hard: 'border-[#fb4b5c]/75 bg-[#440c14]/90 text-[#fda4af] shadow-[0_0_10px_rgba(244,63,94,0.45)]',
 };
 
 export const FlightHud: React.FC<FlightHudProps> = ({
@@ -359,30 +366,38 @@ export const FlightHud: React.FC<FlightHudProps> = ({
             telemetry.boostOverheated
               ? 'border-[#f97316]/65'
               : telemetry.isBoosting
-                ? 'border-[#bae6fd]/65'
+                ? 'border-[#fb4b5c]/80 shadow-[0_0_24px_rgba(255,44,72,0.35)]'
                 : 'border-[#7dd3fc]/32'
           }`}
-          style={{ minWidth: '246px' }}
+          style={{ minWidth: '256px' }}
         >
-          <div className="flex items-center justify-between gap-3">
-            {autoplayActive ? (
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2">
               <span
-                data-testid="autoplay-indicator"
-                className="mach-glow font-display text-[11px] font-bold tracking-[0.18em] text-[#7dd3fc] uppercase"
+                data-testid="hud-difficulty"
+                className={`font-display rounded-[2px] border px-1.5 py-0.5 text-[10px] font-bold tracking-[0.14em] uppercase ${DIFFICULTY_BADGE_STYLES[telemetry.difficulty]}`}
               >
-                AUTOPLAY ON
+                {DIFFICULTY_CONFIGS[telemetry.difficulty].label}
               </span>
-            ) : (
-              <span className="font-display text-[11px] font-bold tracking-[0.18em] text-[#7dd3fc] uppercase">
-                Airspeed
-              </span>
-            )}
+              {autoplayActive ? (
+                <span
+                  data-testid="autoplay-indicator"
+                  className="mach-glow font-display text-[11px] font-bold tracking-[0.16em] text-[#7dd3fc] uppercase"
+                >
+                  AUTOPLAY ON
+                </span>
+              ) : (
+                <span className="font-display text-[11px] font-bold tracking-[0.16em] text-[#7dd3fc] uppercase">
+                  Airspeed
+                </span>
+              )}
+            </div>
             <span
               className={`font-telemetry text-[11px] font-semibold ${
                 telemetry.boostOverheated
                   ? 'text-[#fb923c]'
                   : telemetry.isBoosting
-                    ? 'text-[#fde047]'
+                    ? 'text-[#ff7584]'
                     : 'text-[#f8cbb0]/85'
               }`}
             >
@@ -418,7 +433,7 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                   telemetry.boostOverheated
                     ? 'font-bold text-[#fb923c]'
                     : telemetry.isBoosting
-                      ? 'font-bold text-[#bae6fd]'
+                      ? 'font-bold text-[#ff8a96]'
                       : 'text-[#f5ccb0]/82'
                 }
               >
@@ -441,10 +456,10 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                   background: telemetry.boostOverheated
                     ? 'linear-gradient(90deg, #ea580c, #fb923c)'
                     : telemetry.isBoosting
-                      ? 'linear-gradient(90deg, #38bdf8, #bae6fd, #fb923c)'
+                      ? 'linear-gradient(90deg, #0ea5ff, #38e8ff 46%, #ff2238)'
                       : 'linear-gradient(90deg, #0ea5e9, #67e8f9)',
                   boxShadow: telemetry.isBoosting
-                    ? '0 0 12px rgba(103, 232, 249, 0.85)'
+                    ? '0 0 14px rgba(255, 42, 68, 0.85)'
                     : telemetry.boostOverheated
                       ? '0 0 10px rgba(249, 115, 22, 0.75)'
                       : 'none',
@@ -483,7 +498,7 @@ export const FlightHud: React.FC<FlightHudProps> = ({
             telemetry.boostOverheated
               ? 'border-[#f97316]/60 bg-[#2d1007]/88 text-[#fdba74] cursor-not-allowed'
               : telemetry.isBoosting
-                ? 'border-[#bae6fd] bg-[#0ea5e9] text-[#081520] shadow-[0_0_26px_rgba(56,189,248,0.65)] cursor-pointer'
+                ? 'border-[#ff6b7a] bg-gradient-to-r from-[#0ea5e9] via-[#22d3ee] to-[#e11d48] text-[#fff8f8] shadow-[0_0_26px_rgba(255,44,72,0.62)] cursor-pointer'
                 : 'border-[#7dd3fc]/45 bg-[#160805]/84 text-[#e0f6ff] hover:border-[#bae6fd]/75 hover:bg-[#1e100d]/92 cursor-pointer'
           }`}
         >

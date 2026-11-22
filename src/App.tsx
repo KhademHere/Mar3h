@@ -2,23 +2,34 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { FlightHud } from './components/FlightHud';
 import { GameOverModal, PauseModal } from './components/StatusModal';
 import { TitleOverlay } from './components/TitleOverlay';
+import { DIFFICULTY_CONFIGS } from './game/difficulty';
 import { MarsFlightEngine } from './game/MarsFlightEngine';
 import { START_MACH } from './game/simulation';
 import type {
+  AllDifficultyRecords,
   CameraViewMode,
+  DifficultyId,
   FlightTelemetry,
   GamePhase,
   HudBannerEvent,
   RunSummary,
 } from './game/types';
 
+const INITIAL_RECORDS: AllDifficultyRecords = {
+  easy: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.easy.startMach },
+  medium: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.medium.startMach },
+  hard: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.hard.startMach },
+};
+
 const INITIAL_TELEMETRY: FlightTelemetry = {
+  difficulty: 'easy',
   mach: START_MACH,
   speedMetersPerSec: 131,
   altitude: 20,
   distance: 0,
   score: 0,
   bestScore: 0,
+  bestDistance: 0,
   bestMach: START_MACH,
   nearMissCount: 0,
   boostCharge: 1,
@@ -46,6 +57,8 @@ export default function App() {
   const gateFlashTimerRef = useRef<number | null>(null);
 
   const [phase, setPhase] = useState<GamePhase>('title');
+  const [difficulty, setDifficulty] = useState<DifficultyId>('easy');
+  const [records, setRecords] = useState<AllDifficultyRecords>(INITIAL_RECORDS);
   const [telemetry, setTelemetry] = useState<FlightTelemetry>(INITIAL_TELEMETRY);
   const [banner, setBanner] = useState<HudBannerEvent | null>(null);
   const [nearMissFlash, setNearMissFlash] = useState(false);
@@ -117,6 +130,10 @@ export default function App() {
         onCameraViewChange: (view) => {
           setCameraView(view);
         },
+        onDifficultyChange: (nextDiff, nextRecords) => {
+          setDifficulty(nextDiff);
+          setRecords(nextRecords);
+        },
         onGameOver: (runSummary) => {
           setSummary(runSummary);
         },
@@ -137,6 +154,10 @@ export default function App() {
       engine.dispose();
       engineRef.current = null;
     };
+  }, []);
+
+  const handleSelectDifficulty = useCallback((nextDiff: DifficultyId) => {
+    engineRef.current?.setDifficulty(nextDiff);
   }, []);
 
   const handleStart = useCallback(() => {
@@ -198,9 +219,10 @@ export default function App() {
 
       {phase === 'title' && (
         <TitleOverlay
-          bestScore={telemetry.bestScore}
-          bestMach={telemetry.bestMach}
+          difficulty={difficulty}
+          records={records}
           muted={muted}
+          onSelectDifficulty={handleSelectDifficulty}
           onStart={handleStart}
           onStartAutoplay={handleStartAutoplay}
           onToggleMute={handleToggleMute}
@@ -237,6 +259,8 @@ export default function App() {
       {phase === 'gameover' && summary && (
         <GameOverModal
           summary={summary}
+          selectedDifficulty={difficulty}
+          onSelectDifficulty={handleSelectDifficulty}
           onRestart={handleStart}
           onTitle={handleTitle}
         />

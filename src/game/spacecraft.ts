@@ -327,57 +327,109 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   });
   customMaterials.push(nozzleGlowMat);
 
+  // Inner intense electric-blue jet core right out of both nozzles
   const plumeCoreMat = new THREE.MeshBasicMaterial({
-    color: 0xf0fcff,
+    color: 0xe6f9ff,
     transparent: true,
-    opacity: 0.9,
+    opacity: 0.94,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
+  // Secondary electric blue-cyan cruise / boost inner sheath
   const plumeOuterMat = new THREE.MeshBasicMaterial({
     color: 0x38bdf8,
     transparent: true,
-    opacity: 0.54,
+    opacity: 0.62,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  // Roaring orange-amber afterburner heat envelope & shock diamonds when boosting
-  const plumeHeatMat = new THREE.MeshBasicMaterial({
-    color: 0xff7b29,
+  // Fiery crimson-red outer plasma envelope (NormalBlending preserves vivid crimson against bright Mars dust!)
+  const plumeRedSheathMat = new THREE.MeshBasicMaterial({
+    color: 0xf01830,
+    transparent: true,
+    opacity: 0.0,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  // Long blazing crimson-red trailing plasma tail flare (AdditiveBlending for luminous outer glow)
+  const plumeRedFlareMat = new THREE.MeshBasicMaterial({
+    color: 0xff2238,
     transparent: true,
     opacity: 0.0,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  customMaterials.push(plumeCoreMat, plumeOuterMat, plumeHeatMat);
-
-  const coreConeGeo = new THREE.ConeGeometry(0.16, 1.9, 14, 1, true);
-  coreConeGeo.rotateX(Math.PI / 2);
-  coreConeGeo.translate(0, 0, 0.95);
-  disposables.push(coreConeGeo);
-
-  const outerConeGeo = new THREE.ConeGeometry(0.27, 3.2, 14, 1, true);
-  outerConeGeo.rotateX(Math.PI / 2);
-  outerConeGeo.translate(0, 0, 1.6);
-  disposables.push(outerConeGeo);
-
-  const heatConeGeo = new THREE.ConeGeometry(0.39, 4.7, 14, 1, true);
-  heatConeGeo.rotateX(Math.PI / 2);
-  heatConeGeo.translate(0, 0, 2.35);
-  disposables.push(heatConeGeo);
-
-  const enginePlumes: THREE.Group[] = [];
-  const heatCones: THREE.Mesh[] = [];
-  const engineHaloSprites: THREE.Sprite[] = [];
-  const haloMat = new THREE.SpriteMaterial({
-    map: materials.glowTexture,
-    color: 0x7dd3fc,
+  // Pulsing shock-diamond flame rings flickering down the afterburner exhaust stream
+  const shockDiamondBlueMat = new THREE.MeshBasicMaterial({
+    color: 0x38e8ff,
     transparent: true,
-    opacity: 0.65,
+    opacity: 0.0,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   });
-  customMaterials.push(haloMat);
+  const shockDiamondRedMat = new THREE.MeshBasicMaterial({
+    color: 0xff263e,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  customMaterials.push(
+    plumeCoreMat,
+    plumeOuterMat,
+    plumeRedSheathMat,
+    plumeRedFlareMat,
+    shockDiamondBlueMat,
+    shockDiamondRedMat,
+  );
+
+  const coreConeGeo = new THREE.ConeGeometry(0.185, 2.55, 14, 1, true);
+  coreConeGeo.rotateX(Math.PI / 2);
+  coreConeGeo.translate(0, 0, 1.28);
+  disposables.push(coreConeGeo);
+
+  const outerConeGeo = new THREE.ConeGeometry(0.31, 3.65, 14, 1, true);
+  outerConeGeo.rotateX(Math.PI / 2);
+  outerConeGeo.translate(0, 0, 1.82);
+  disposables.push(outerConeGeo);
+
+  const redSheathGeo = new THREE.ConeGeometry(0.45, 5.4, 16, 1, true);
+  redSheathGeo.rotateX(Math.PI / 2);
+  redSheathGeo.translate(0, 0, 3.35);
+  disposables.push(redSheathGeo);
+
+  const redFlareGeo = new THREE.ConeGeometry(0.58, 6.8, 14, 1, true);
+  redFlareGeo.rotateX(Math.PI / 2);
+  redFlareGeo.translate(0, 0, 3.95);
+  disposables.push(redFlareGeo);
+
+  const shockDiamondGeo = new THREE.TorusGeometry(0.24, 0.055, 8, 18);
+  disposables.push(shockDiamondGeo);
+
+  const enginePlumes: THREE.Group[] = [];
+  const redSheathCones: THREE.Mesh[] = [];
+  const redFlareCones: THREE.Mesh[] = [];
+  const shockDiamondSets: THREE.Mesh[][] = [];
+  const engineHaloSprites: THREE.Sprite[] = [];
+  const engineRedHaloSprites: THREE.Sprite[] = [];
+
+  const haloBlueMat = new THREE.SpriteMaterial({
+    map: materials.glowTexture,
+    color: 0x38d9ff,
+    transparent: true,
+    opacity: 0.72,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const haloRedMat = new THREE.SpriteMaterial({
+    map: materials.glowTexture,
+    color: 0xff2238,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  customMaterials.push(haloBlueMat, haloRedMat);
 
   for (const side of [-1, 1] as const) {
     const nx = 0.58 * side;
@@ -392,25 +444,68 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
 
     const plumeGroup = new THREE.Group();
     plumeGroup.position.set(nx, -0.02, 2.94);
-    plumeGroup.add(new THREE.Mesh(coreConeGeo, plumeCoreMat));
-    plumeGroup.add(new THREE.Mesh(outerConeGeo, plumeOuterMat));
-    const heatCone = new THREE.Mesh(heatConeGeo, plumeHeatMat);
-    plumeGroup.add(heatCone);
-    heatCones.push(heatCone);
+
+    // Explicit render order: crimson outer plasma sheath -> crimson flare -> electric-blue sheath -> electric-blue core -> shock diamonds
+    const redSheath = new THREE.Mesh(redSheathGeo, plumeRedSheathMat);
+    redSheath.renderOrder = 1;
+    plumeGroup.add(redSheath);
+    redSheathCones.push(redSheath);
+
+    const redFlare = new THREE.Mesh(redFlareGeo, plumeRedFlareMat);
+    redFlare.renderOrder = 2;
+    plumeGroup.add(redFlare);
+    redFlareCones.push(redFlare);
+
+    const outerCone = new THREE.Mesh(outerConeGeo, plumeOuterMat);
+    outerCone.renderOrder = 3;
+    plumeGroup.add(outerCone);
+
+    const coreCone = new THREE.Mesh(coreConeGeo, plumeCoreMat);
+    coreCone.renderOrder = 4;
+    plumeGroup.add(coreCone);
+
+    // 4 pulsing shock-diamond flame rings spaced down the exhaust stream
+    const diamonds: THREE.Mesh[] = [];
+    for (let d = 0; d < 4; d++) {
+      const dm = new THREE.Mesh(
+        shockDiamondGeo,
+        d < 2 ? shockDiamondBlueMat : shockDiamondRedMat,
+      );
+      dm.position.z = 0.78 + d * 0.96;
+      const baseRadius = 1.0 - d * 0.14;
+      dm.scale.set(baseRadius, baseRadius, 1);
+      dm.visible = false;
+      plumeGroup.add(dm);
+      diamonds.push(dm);
+    }
+    shockDiamondSets.push(diamonds);
+
     hullRoot.add(plumeGroup);
     enginePlumes.push(plumeGroup);
 
-    const sprite = new THREE.Sprite(haloMat);
-    sprite.position.set(nx, -0.02, 3.04);
-    sprite.scale.set(1.05, 1.05, 1);
-    hullRoot.add(sprite);
-    engineHaloSprites.push(sprite);
+    const blueSprite = new THREE.Sprite(haloBlueMat);
+    blueSprite.position.set(nx, -0.02, 3.06);
+    blueSprite.scale.set(1.08, 1.08, 1);
+    hullRoot.add(blueSprite);
+    engineHaloSprites.push(blueSprite);
+
+    const redSprite = new THREE.Sprite(haloRedMat);
+    redSprite.position.set(nx, -0.02, 3.7);
+    redSprite.scale.set(1.85, 1.85, 1);
+    hullRoot.add(redSprite);
+    engineRedHaloSprites.push(redSprite);
   }
 
-  // Subtle thruster PointLight illuminating wings & canyon nearby
-  const engineLight = new THREE.PointLight(0x67e8f9, 8, 18, 2);
-  engineLight.position.set(0, 0.2, 3.6);
-  hullRoot.add(engineLight);
+  // Dual flickering thruster PointLights:
+  // 1) Electric blue right at nozzles illuminating tail fins & wings
+  // 2) Blazing crimson-red aft & slightly lower casting rich flickering glow across wings & Martian canyon floor
+  const engineLightBlue = new THREE.PointLight(0x38d9ff, 9, 22, 1.8);
+  engineLightBlue.position.set(0, 0.35, 3.35);
+  hullRoot.add(engineLightBlue);
+
+  const engineLightRed = new THREE.PointLight(0xff2036, 0, 42, 1.5);
+  engineLightRed.position.set(0, -0.45, 5.2);
+  hullRoot.add(engineLightRed);
 
   // 10. Crisp Expanding Supersonic Mach Shockwave Double-Ring around the wings
   const shockwaveGroup = new THREE.Group();
@@ -445,22 +540,93 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   vaporConeMesh.position.z = 0.45;
   shockwaveGroup.add(vaporConeMesh);
 
-  // 11. World-space wingtip plasma ribbon trails (kept outside craft transform so they curve smoothly in world space)
+  // 11. World-space wingtip plasma ribbon trails + pooled Blue-and-Red Afterburner Spark Wisps
   const trailGroup = new THREE.Group();
   const leftTrail = new WingtipTrail();
   const rightTrail = new WingtipTrail();
   trailGroup.add(leftTrail.mesh, rightTrail.mesh);
 
-  // Pre-allocated scratch vectors for zero-GC update
+  const SPARK_COUNT = 44;
+  const sparkGeo = new THREE.BoxGeometry(0.11, 0.11, 1.35);
+  disposables.push(sparkGeo);
+  const sparkMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.92,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  customMaterials.push(sparkMat);
+  const sparkMesh = new THREE.InstancedMesh(sparkGeo, sparkMat, SPARK_COUNT);
+  sparkMesh.frustumCulled = false;
+  trailGroup.add(sparkMesh);
+
+  interface ExhaustSpark {
+    active: boolean;
+    x: number;
+    y: number;
+    z: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    life: number;
+    maxLife: number;
+    scale: number;
+    isBlue: boolean;
+  }
+  const sparks: ExhaustSpark[] = Array.from({ length: SPARK_COUNT }, () => ({
+    active: false,
+    x: 0,
+    y: -999,
+    z: 0,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    life: 0,
+    maxLife: 0.3,
+    scale: 1,
+    isBlue: false,
+  }));
+  const _sparkDummy = new THREE.Object3D();
+  const _sparkBlueColor = new THREE.Color(0x38e2ff);
+  const _sparkRedColor = new THREE.Color(0xff2238);
+  for (let i = 0; i < SPARK_COUNT; i++) {
+    _sparkDummy.position.set(0, -999, 0);
+    _sparkDummy.scale.set(0.001, 0.001, 0.001);
+    _sparkDummy.updateMatrix();
+    sparkMesh.setMatrixAt(i, _sparkDummy.matrix);
+    sparkMesh.setColorAt(i, i % 3 === 0 ? _sparkBlueColor : _sparkRedColor);
+  }
+  sparkMesh.instanceMatrix.needsUpdate = true;
+  if (sparkMesh.instanceColor) sparkMesh.instanceColor.needsUpdate = true;
+
+  // Pre-allocated scratch vectors & colors for zero-GC update
   const _leftTipLocal = new THREE.Vector3(-3.52, 0.02, 2.05);
   const _rightTipLocal = new THREE.Vector3(3.52, 0.02, 2.05);
+  const _leftNozzleLocal = new THREE.Vector3(-0.58, -0.02, 3.35);
+  const _rightNozzleLocal = new THREE.Vector3(0.58, -0.02, 3.35);
   const _leftTipWorld = new THREE.Vector3();
   const _rightTipWorld = new THREE.Vector3();
+  const _nozzleWorld = new THREE.Vector3();
+  const _aftDirWorld = new THREE.Vector3();
+
+  const _cruiseCoreColor = new THREE.Color(0xe6f9ff);
+  const _boostCoreColor = new THREE.Color(0x2cd4ff);
+  const _cruiseOuterColor = new THREE.Color(0x38bdf8);
+  const _boostOuterColor = new THREE.Color(0x0ea5ff);
+  const _cruiseNozzleColor = new THREE.Color(0xd8f8ff);
+  const _boostNozzleColor = new THREE.Color(0x4de8ff);
+  const _tmpColor = new THREE.Color();
 
   let shockwaveTimer = 0;
   let shockwaveDuration = 0.65;
   let shockwavePeakScale = 2.6;
   let flickerClock = 0;
+  let boostVisual = 0; // 0 (normal cruising light-blue) -> 1 (full blazing electric-blue + crimson-red!)
+  let ignitionFlash = 0; // crisp burst flash when afterburner engages
+  let wasBoosting = false;
+  let sparkSpawnAccum = 0;
+  let sparkCursor = 0;
 
   return {
     group,
@@ -477,6 +643,17 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       _rightTipWorld.copy(worldPos).add(_rightTipLocal);
       leftTrail.reset(_leftTipWorld);
       rightTrail.reset(_rightTipWorld);
+      boostVisual = 0;
+      ignitionFlash = 0;
+      wasBoosting = false;
+      for (let i = 0; i < SPARK_COUNT; i++) {
+        sparks[i].active = false;
+        _sparkDummy.position.set(0, -999, 0);
+        _sparkDummy.scale.set(0.001, 0.001, 0.001);
+        _sparkDummy.updateMatrix();
+        sparkMesh.setMatrixAt(i, _sparkDummy.matrix);
+      }
+      sparkMesh.instanceMatrix.needsUpdate = true;
     },
     setVisible: (visible: boolean) => {
       group.visible = visible;
@@ -490,28 +667,143 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
     updateVisuals: (dt, mach, boosting, _roll, worldPos, worldQuat) => {
       flickerClock += dt;
 
-      // Dynamic thruster plume length, flicker, and roaring blue-and-orange afterburner flare
+      // Crisp ignition flash on boost start + smooth thermal ramp & cooldown back to normal cruising blue
+      if (boosting && !wasBoosting) {
+        ignitionFlash = 1.0;
+      }
+      wasBoosting = boosting;
+      ignitionFlash = Math.max(0, ignitionFlash - dt * 4.4);
+
+      const rampRate = boosting ? 14.0 : 5.2;
+      boostVisual += ((boosting ? 1 : 0) - boostVisual) * (1 - Math.exp(-rampRate * dt));
+
       const machFactor = Math.max(0.45, (mach - 0.85) * 0.75);
-      const boostFactor = boosting ? 1.88 : 1.0;
-      const flicker = 0.92 + Math.sin(flickerClock * 62) * 0.08 + Math.cos(flickerClock * 97) * 0.05;
-      const plumeZ = (0.82 + machFactor * 0.36) * boostFactor * flicker;
-      const plumeXY = (0.86 + (boosting ? 0.34 : 0)) * (0.95 + Math.sin(flickerClock * 46) * 0.05);
+      const boostLengthFactor = 1.0 + boostVisual * 1.18 + ignitionFlash * 0.35;
+      const boostWidthFactor = 1.0 + boostVisual * 0.44 + ignitionFlash * 0.22;
+      const flicker =
+        0.91 + Math.sin(flickerClock * 64) * 0.09 + Math.cos(flickerClock * 103) * 0.06;
+      const redPulse = 0.88 + Math.sin(flickerClock * 82) * 0.12;
+
+      const plumeZ = (0.85 + machFactor * 0.34) * boostLengthFactor * flicker;
+      const plumeXY = 0.88 * boostWidthFactor * (0.95 + Math.sin(flickerClock * 50) * 0.05);
 
       for (let i = 0; i < enginePlumes.length; i++) {
         enginePlumes[i].scale.set(plumeXY, plumeXY, plumeZ);
-        // Subtle heat-shimmer wobble on the orange afterburner envelope
-        const shimmerX = 1 + Math.sin(flickerClock * 78 + i * 2.1) * 0.14;
-        const shimmerY = 1 + Math.cos(flickerClock * 69 + i * 1.7) * 0.14;
-        heatCones[i].scale.set(shimmerX, shimmerY, boosting ? 1.15 : 0.45);
-        const haloScale = (0.98 + (boosting ? 0.9 : 0) + machFactor * 0.2) * flicker;
-        engineHaloSprites[i].scale.set(haloScale, haloScale, 1);
+
+        // Fiery crimson-red outer plasma envelope & trailing tail stretch & shimmer fiercely during boost
+        const shimmerX = 1 + Math.sin(flickerClock * 84 + i * 2.1) * 0.14 * boostVisual;
+        const shimmerY = 1 + Math.cos(flickerClock * 73 + i * 1.7) * 0.14 * boostVisual;
+        redSheathCones[i].visible = boostVisual > 0.02;
+        redFlareCones[i].visible = boostVisual > 0.02;
+        redSheathCones[i].scale.set(shimmerX, shimmerY, 0.55 + boostVisual * 0.72);
+        redFlareCones[i].scale.set(
+          shimmerX * (1.06 + ignitionFlash * 0.25),
+          shimmerY * (1.06 + ignitionFlash * 0.25),
+          0.62 + boostVisual * 0.85,
+        );
+
+        // Pulsing shock-diamond flame rings traveling & throbbing down the blue-and-red exhaust
+        const diamonds = shockDiamondSets[i];
+        const showDiamonds = boostVisual > 0.06;
+        for (let d = 0; d < diamonds.length; d++) {
+          const dm = diamonds[d];
+          dm.visible = showDiamonds;
+          if (showDiamonds) {
+            const wave = Math.sin(flickerClock * 42 - d * 1.45 + i * 0.8) * 0.5 + 0.5;
+            const ringScale = (0.76 - d * 0.11) * (0.88 + wave * 0.34 + ignitionFlash * 0.25);
+            dm.scale.set(ringScale, ringScale, 1.0 + wave * 0.4);
+            dm.position.z = 0.72 + d * 0.92 + Math.sin(flickerClock * 36 - d) * 0.08;
+          }
+        }
+
+        const blueHaloScale = (1.0 + boostVisual * 0.85 + ignitionFlash * 0.75 + machFactor * 0.18) * flicker;
+        engineHaloSprites[i].scale.set(blueHaloScale, blueHaloScale, 1);
+
+        const redHaloScale = (1.45 + boostVisual * 1.75 + ignitionFlash * 1.1) * redPulse;
+        engineRedHaloSprites[i].visible = boostVisual > 0.02;
+        engineRedHaloSprites[i].scale.set(redHaloScale, redHaloScale, 1);
       }
 
-      engineLight.intensity = (7 + machFactor * 4 + (boosting ? 15 : 0)) * flicker;
-      engineLight.color.setHex(boosting ? 0xffb366 : 0x67e8f9);
-      plumeOuterMat.color.setHex(boosting ? 0x93e2ff : 0x38bdf8);
-      plumeHeatMat.opacity = boosting ? 0.56 * flicker : 0.0;
-      haloMat.color.setHex(boosting ? 0xffc88a : 0x7dd3fc);
+      // Color blend: clean cruising light-blue -> vivid electric-blue core + blazing crimson-red plasma!
+      plumeCoreMat.color.copy(_cruiseCoreColor).lerp(_boostCoreColor, boostVisual);
+      plumeOuterMat.color.copy(_cruiseOuterColor).lerp(_boostOuterColor, boostVisual);
+      nozzleGlowMat.color.copy(_cruiseNozzleColor).lerp(_boostNozzleColor, boostVisual);
+
+      plumeRedSheathMat.opacity = Math.min(0.56, boostVisual * 0.48 * redPulse + ignitionFlash * 0.16);
+      plumeRedFlareMat.opacity = Math.min(0.68, boostVisual * 0.56 * flicker + ignitionFlash * 0.28);
+      shockDiamondBlueMat.opacity = Math.min(0.96, boostVisual * 0.9 * flicker + ignitionFlash * 0.22);
+      shockDiamondRedMat.opacity = Math.min(0.92, boostVisual * 0.84 * redPulse + ignitionFlash * 0.2);
+      haloBlueMat.opacity = 0.72 + boostVisual * 0.26 + ignitionFlash * 0.2;
+      haloRedMat.opacity = Math.min(0.62, boostVisual * 0.48 * redPulse + ignitionFlash * 0.24);
+
+      // Flickering blue-and-red dynamic lighting across rear V-tail fins, wings & dusty Martian ground
+      engineLightBlue.intensity =
+        (8 + machFactor * 3.5 + boostVisual * 18 + ignitionFlash * 16) * flicker;
+      engineLightRed.intensity =
+        (boostVisual * 34 + ignitionFlash * 22) * redPulse;
+
+      // Spawn & update trailing glowing blue-and-red afterburner sparks & heat streaks
+      if (boostVisual > 0.14) {
+        sparkSpawnAccum += dt * (48 + boostVisual * 52);
+        _aftDirWorld.set(0, 0, 1).applyQuaternion(worldQuat);
+        while (sparkSpawnAccum >= 1) {
+          sparkSpawnAccum -= 1;
+          const sp = sparks[sparkCursor];
+          sparkCursor = (sparkCursor + 1) % SPARK_COUNT;
+          const nozzleLocal = sparkCursor % 2 === 0 ? _leftNozzleLocal : _rightNozzleLocal;
+          _nozzleWorld.copy(nozzleLocal).applyQuaternion(worldQuat).add(worldPos);
+          const isBlue = sparkCursor % 3 === 0;
+          sp.active = true;
+          sp.isBlue = isBlue;
+          sp.x = _nozzleWorld.x + (Math.random() - 0.5) * 0.45;
+          sp.y = _nozzleWorld.y + (Math.random() - 0.5) * 0.45;
+          sp.z = _nozzleWorld.z + (Math.random() - 0.5) * 0.4;
+          const ejectSpeed = 32 + Math.random() * 44;
+          sp.vx = _aftDirWorld.x * ejectSpeed + (Math.random() - 0.5) * 9;
+          sp.vy = _aftDirWorld.y * ejectSpeed + (Math.random() - 0.5) * 7;
+          sp.vz = _aftDirWorld.z * ejectSpeed + 18;
+          sp.maxLife = 0.18 + Math.random() * 0.22;
+          sp.life = sp.maxLife;
+          sp.scale = isBlue ? 0.9 + Math.random() * 0.5 : 1.05 + Math.random() * 0.65;
+          sparkMesh.setColorAt(sparkCursor, isBlue ? _sparkBlueColor : _sparkRedColor);
+        }
+        if (sparkMesh.instanceColor) sparkMesh.instanceColor.needsUpdate = true;
+      }
+
+      let anySparksUpdated = false;
+      for (let i = 0; i < SPARK_COUNT; i++) {
+        const sp = sparks[i];
+        if (!sp.active) continue;
+        anySparksUpdated = true;
+        sp.life -= dt;
+        if (sp.life <= 0) {
+          sp.active = false;
+          _sparkDummy.position.set(0, -999, 0);
+          _sparkDummy.scale.set(0.001, 0.001, 0.001);
+          _sparkDummy.updateMatrix();
+          sparkMesh.setMatrixAt(i, _sparkDummy.matrix);
+          continue;
+        }
+        sp.x += sp.vx * dt;
+        sp.y += sp.vy * dt;
+        sp.z += sp.vz * dt;
+        const lifeT = sp.life / sp.maxLife;
+        _sparkDummy.position.set(sp.x, sp.y, sp.z);
+        _sparkDummy.quaternion.copy(worldQuat);
+        _sparkDummy.scale.set(
+          sp.scale * lifeT,
+          sp.scale * lifeT,
+          sp.scale * (0.9 + lifeT * 1.6),
+        );
+        _sparkDummy.updateMatrix();
+        sparkMesh.setMatrixAt(i, _sparkDummy.matrix);
+      }
+      if (anySparksUpdated) {
+        sparkMesh.instanceMatrix.needsUpdate = true;
+      }
+
+      // Keep _tmpColor referenced cleanly if needed for future blending
+      _tmpColor.copy(_cruiseCoreColor);
 
       // Update expanding supersonic shockwave double-ring halo
       if (shockwaveTimer > 0) {
@@ -537,8 +829,8 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       _leftTipWorld.copy(_leftTipLocal).applyQuaternion(worldQuat).add(worldPos);
       _rightTipWorld.copy(_rightTipLocal).applyQuaternion(worldQuat).add(worldPos);
 
-      const trailWidth = boosting ? 0.15 : 0.09 + Math.min(0.05, (mach - 1) * 0.02);
-      const trailBrightness = boosting ? 0.95 : 0.62 + Math.min(0.25, (mach - 1) * 0.1);
+      const trailWidth = boosting ? 0.16 : 0.09 + Math.min(0.05, (mach - 1) * 0.02);
+      const trailBrightness = boosting ? 0.98 : 0.62 + Math.min(0.25, (mach - 1) * 0.1);
       leftTrail.pushPoint(_leftTipWorld, trailWidth, trailBrightness);
       rightTrail.pushPoint(_rightTipWorld, trailWidth, trailBrightness);
     },

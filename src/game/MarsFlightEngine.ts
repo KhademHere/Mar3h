@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { FlightAudioEngine } from './audio';
+import { DIFFICULTY_CONFIGS, DIFFICULTY_ORDER, getDifficultyConfig } from './difficulty';
 import { createMarsMaterialLibrary, type MarsMaterialLibrary } from './materials';
 import { createMarsWorldRig, HORIZON_FOG_COLOR, SUN_DIRECTION, type MarsWorldRig } from './marsWorld';
 import {
@@ -14,8 +15,10 @@ import {
 import { createSpacecraftRig, type SpacecraftRig } from './spacecraft';
 import { getTerrainHeight, getZoneInfoAtZ } from './terrainMath';
 import type {
+  AllDifficultyRecords,
   CameraViewMode,
   ControlInput,
+  DifficultyId,
   FlightTelemetry,
   GamePhase,
   HudBannerEvent,
@@ -30,9 +33,19 @@ const CAMERA_VIEW_LABELS: Record<CameraViewMode, { label: string; sublabel: stri
   cinematic: { label: 'VIEW: CINEMATIC FLYBY', sublabel: 'DYNAMIC SHOWCASE CAM' },
 };
 
-const STORAGE_BEST_SCORE = 'ares_mach_best_score_v1';
-const STORAGE_BEST_MACH = 'ares_mach_best_mach_v1';
+const STORAGE_BEST_SCORE_LEGACY = 'ares_mach_best_score_v1';
+const STORAGE_BEST_MACH_LEGACY = 'ares_mach_best_mach_v1';
+const STORAGE_DIFFICULTY = 'ares_mach_difficulty_v1';
+const STORAGE_RECORDS = 'ares_mach_records_v2';
 const FX_TRAIL_CAPACITY = 54;
+
+function createDefaultRecords(): AllDifficultyRecords {
+  return {
+    easy: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.easy.startMach },
+    medium: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.medium.startMach },
+    hard: { bestScore: 0, bestDistance: 0, bestMach: DIFFICULTY_CONFIGS.hard.startMach },
+  };
+}
 
 interface WindStreak {
   angle: number;
@@ -60,6 +73,7 @@ export interface MarsFlightCallbacks {
   onGateFlash: () => void;
   onAutoplayChange: (active: boolean) => void;
   onCameraViewChange: (view: CameraViewMode) => void;
+  onDifficultyChange: (difficulty: DifficultyId, records: AllDifficultyRecords) => void;
 }
 
 /**
@@ -85,14 +99,14 @@ export class MarsFlightEngine {
   private readonly audio: FlightAudioEngine;
 
   private phase: GamePhase = 'title';
-  private flight: FlightState = createInitialFlightState();
+  private difficulty: DifficultyId = 'easy';
+  private flight: FlightState = createInitialFlightState('easy');
   private autoplayActive = false;
   private cameraView: CameraViewMode = 'chase';
   private cinematicClock = 0;
   private lastCinematicShotIdx = -1;
   private gateWindBurstTimer = 0;
-  private bestScore = 0;
-  private bestMach = 1.25;
+  private records: AllDifficultyRecords = createDefaultRecords();
 
   private frameId = 0;
   private disposed = false;
@@ -265,12 +279,17 @@ export class MarsFlightEngine {
       this.renderer.compile(this.scene, this.camera);
     }
 
+    this.flight = createInitialFlightState(this.difficulty);
+    this.world.reset(this.difficulty);
+    this.applyDifficultyLighting();
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
     this.resetFxTrails();
     this.world.update(0.016, this.flight.x, this.flight.y, this.flight.z, this.flight.survivalSeconds);
     this.updateZoneAtmosphere();
     this.updateSunShadowRig();
+
+    this.callbacks.onDifficultyChange(this.difficulty, this.cloneRecords());
 
     if (initialAutostart) {
       this.startRun(false);
@@ -285,12 +304,48 @@ export class MarsFlightEngine {
     this.tick();
   }
 
+  private cloneRecords(): AllDifficultyRecords {
+    return {
+      easy: { ...this.records.easy },
+      medium: { ...this.records.medium },
+      hard: { ...this.records.hard },
+    };
+  }
+
   private loadSavedRecords(): void {
     try {
-      const savedScore = Number(window.localStorage.getItem(STORAGE_BEST_SCORE));
-      const savedMach = Number(window.localStorage.getItem(STORAGE_BEST_MACH));
-      if (Number.isFinite(savedScore) && savedScore > 0) this.bestScore = savedScore;
-      if (Number.isFinite(savedMach) && savedMach > 1.25) this.bestMach = savedMach;
+      const savedDiff = window.localStorage.getItem(STORAGE_DIFFICULTY);
+      if (savedDiff && (DIFFICULTY_ORDER as readonly string[]).includes(savedDiff)) {
+        this.difficulty = savedDiff as DifficultyId;
+      }
+
+      const rawRecords = window.localStorage.getItem(STORAGE_RECORDS);
+      if (rawRecords) {
+        const parsed = JSON.parse(rawRecords) as Partial<AllDifficultyRecords>;
+        for (const id of DIFFICULTY_ORDER) {
+          const item = parsed[id];
+          if (!item) continue;
+          if (Number.isFinite(item.bestScore) && item.bestScore > 0) {
+            this.records[id].bestScore = Math.round(item.bestScore);
+          }
+          if (Number.isFinite(item.bestDistance) && item.bestDistance > 0) {
+            this.records[id].bestDistance = Math.round(item.bestDistance);
+          }
+          if (Number.isFinite(item.bestMach) && item.bestMach > this.records[id].bestMach) {
+            this.records[id].bestMach = Number(item.bestMach.toFixed(2));
+          }
+        }
+      } else {
+        // Migrate legacy v1 records into Easy tier seamlessly
+        const savedScore = Number(window.localStorage.getItem(STORAGE_BEST_SCORE_LEGACY));
+        const savedMach = Number(window.localStorage.getItem(STORAGE_BEST_MACH_LEGACY));
+        if (Number.isFinite(savedScore) && savedScore > 0) {
+          this.records.easy.bestScore = Math.round(savedScore);
+        }
+        if (Number.isFinite(savedMach) && savedMach > this.records.easy.bestMach) {
+          this.records.easy.bestMach = Number(savedMach.toFixed(2));
+        }
+      }
     } catch {
       // Ignore storage failures
     }
@@ -298,10 +353,54 @@ export class MarsFlightEngine {
 
   private saveRecords(): void {
     try {
-      window.localStorage.setItem(STORAGE_BEST_SCORE, String(Math.round(this.bestScore)));
-      window.localStorage.setItem(STORAGE_BEST_MACH, this.bestMach.toFixed(2));
+      window.localStorage.setItem(STORAGE_DIFFICULTY, this.difficulty);
+      window.localStorage.setItem(STORAGE_RECORDS, JSON.stringify(this.records));
     } catch {
       // Ignore storage failures
+    }
+  }
+
+  private applyDifficultyLighting(): void {
+    if (this.difficulty === 'hard') {
+      this.sunLight.color.setHex(0xffa694);
+      this.sunLight.intensity = 2.48;
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.density = 0.00205;
+      }
+    } else if (this.difficulty === 'medium') {
+      this.sunLight.color.setHex(0xffb886);
+      this.sunLight.intensity = 2.34;
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.density = 0.00182;
+      }
+    } else {
+      this.sunLight.color.setHex(0xffbe7d);
+      this.sunLight.intensity = 2.25;
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.density = 0.0017;
+      }
+    }
+  }
+
+  public setDifficulty(difficulty: DifficultyId): void {
+    if (this.difficulty === difficulty) return;
+    this.difficulty = difficulty;
+    this.saveRecords();
+    this.applyDifficultyLighting();
+    this.world.setDifficulty(difficulty);
+
+    if (this.phase === 'title') {
+      this.flight = createInitialFlightState(difficulty);
+      this.syncCraftTransform(0.016);
+      this.spacecraft.resetTrails(this._craftPos);
+      this.resetFxTrails();
+    }
+
+    this.updateZoneAtmosphere();
+    this.callbacks.onDifficultyChange(this.difficulty, this.cloneRecords());
+    this.emitTelemetryNow();
+    if (!this.disposed) {
+      this.renderer.render(this.scene, this.camera);
     }
   }
 
@@ -401,8 +500,8 @@ export class MarsFlightEngine {
       this.camera.lookAt(this._curCamLook);
     } else if (this.cameraView === 'wing') {
       this.camera.up.set(0, 1, 0);
-      this._camTargetPos.set(4.65, 0.82, 3.85).applyQuaternion(this._craftQuat).add(this._craftPos);
-      this._camLookAt.set(-0.4, 0.16, -34).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camTargetPos.set(4.85, 0.76, 4.45).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._craftQuat).add(this._craftPos);
       this.camera.position.copy(this._camTargetPos);
       this._curCamLook.copy(this._camLookAt);
       this.camera.lookAt(this._curCamLook);
@@ -411,7 +510,7 @@ export class MarsFlightEngine {
       this.lastCinematicShotIdx = 0;
       const desiredX = this.flight.x + 14;
       const desiredZ = this.flight.z - 18;
-      const safeY = Math.max(getTerrainHeight(desiredX, desiredZ) + 5.0, this.flight.y + 4.2);
+      const safeY = Math.max(getTerrainHeight(desiredX, desiredZ, this.difficulty) + 5.0, this.flight.y + 4.2);
       this.camera.position.set(desiredX, safeY, desiredZ);
       this._curCamLook.set(this.flight.x, this.flight.y + 0.5, this.flight.z);
       this.camera.lookAt(this._curCamLook);
@@ -444,8 +543,9 @@ export class MarsFlightEngine {
       this.callbacks.onAutoplayChange(this.autoplayActive);
     }
 
-    this.flight = createInitialFlightState();
-    this.world.reset();
+    this.flight = createInitialFlightState(this.difficulty);
+    this.world.reset(this.difficulty);
+    this.applyDifficultyLighting();
     this.spacecraft.setVisible(true);
     this.spacecraft.setCockpitMode(this.cameraView === 'cockpit');
     this.syncCraftTransform(0.016);
@@ -489,8 +589,9 @@ export class MarsFlightEngine {
     this.crashDelayTimer = 0;
     this.autoplayActive = false;
     this.callbacks.onAutoplayChange(false);
-    this.flight = createInitialFlightState();
-    this.world.reset();
+    this.flight = createInitialFlightState(this.difficulty);
+    this.world.reset(this.difficulty);
+    this.applyDifficultyLighting();
     this.spacecraft.setVisible(true);
     this.spacecraft.setCockpitMode(false);
     this.camera.up.set(0, 1, 0);
@@ -810,14 +911,14 @@ export class MarsFlightEngine {
       this.camera.up.lerp(this._camUpScratch, 1 - Math.exp(-16 * dt));
       this.camera.lookAt(this._curCamLook);
     } else if (this.cameraView === 'wing' && !this.flight.crashed) {
-      // 3. Wing-Tip Action View: dramatic starboard wing mount showcasing glowing thruster flare + needle nose!
+      // 3. Wing-Tip Action View: dramatic starboard wing mount showcasing glowing blue-and-red thruster plume + needle nose!
       this.camera.up.set(0, 1, 0);
-      const boostBack = this.flight.isBoosting ? 0.65 : 0;
+      const boostBack = this.flight.isBoosting ? 0.72 : 0;
       this._camTargetPos
-        .set(4.65, 0.82, 3.85 + boostBack)
+        .set(4.85, 0.76, 4.45 + boostBack)
         .applyQuaternion(this._craftQuat)
         .add(this._craftPos);
-      this._camLookAt.set(-0.4, 0.16, -34).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._craftQuat).add(this._craftPos);
 
       this.camera.position.x = damp(this.camera.position.x, this._camTargetPos.x, 18, dt);
       this.camera.position.y = damp(this.camera.position.y, this._camTargetPos.y, 18, dt);
@@ -875,7 +976,7 @@ export class MarsFlightEngine {
 
       const desiredX = this.flight.x + offX;
       const desiredZ = this.flight.z + offZ;
-      const minSafeCamY = getTerrainHeight(desiredX, desiredZ) + 5.0;
+      const minSafeCamY = getTerrainHeight(desiredX, desiredZ, this.difficulty) + 5.0;
       const desiredY = Math.max(minSafeCamY, this.flight.y + offY);
 
       if (shotIdx !== this.lastCinematicShotIdx) {
@@ -976,25 +1077,42 @@ export class MarsFlightEngine {
       Math.min(this.trailCount, Math.round(14 + machNorm * (FX_TRAIL_CAPACITY - 14))),
     );
 
-    // Dynamic color palette shifting with Mach intensity:
-    // Low Mach -> cool sky cyan; Mid Mach -> electric bright cyan; High Mach / Boost -> superheated plasma violet-gold & white-hot core
-    const outerR = Math.round(56 + machNorm * 145 + (boosting ? 45 : 0));
-    const outerG = Math.round(196 + (1 - Math.abs(machNorm - 0.5) * 1.1) * 44);
-    const outerB = Math.round(255 - Math.max(0, machNorm - 0.65) * 95);
+    // Dynamic color palette:
+    // Wingtips stay crisp supersonic cyan-blue; during Afterburner Boost, the center engine exhaust
+    // blazes with a fiery crimson-red outer plasma halo and vivid electric-blue inner core!
+    const wingOuterR = Math.round(48 + machNorm * 95);
+    const wingOuterG = Math.round(205 + (1 - Math.abs(machNorm - 0.5)) * 35);
+    const wingOuterB = 255;
 
-    const coreR = Math.round(220 + machNorm * 35);
-    const coreG = Math.round(248 - Math.max(0, machNorm - 0.72) * 20);
-    const coreB = 255;
+    const wingCoreR = 224;
+    const wingCoreG = 248;
+    const wingCoreB = 255;
 
-    const baseOpacity = (0.34 + machNorm * 0.54) * (boosting ? 1.15 : 1.0);
-    const baseOuterWidth = (3.2 + machNorm * 6.8) * (boosting ? 1.25 : 1.0);
-    const baseCoreWidth = (1.1 + machNorm * 2.4) * (boosting ? 1.2 : 1.0);
+    const centerOuterR = boosting ? 255 : wingOuterR;
+    const centerOuterG = boosting ? 26 : wingOuterG;
+    const centerOuterB = boosting ? 48 : wingOuterB;
+
+    const centerCoreR = boosting ? 46 : wingCoreR;
+    const centerCoreG = boosting ? 226 : wingCoreG;
+    const centerCoreB = 255;
+
+    const baseOpacity = (0.34 + machNorm * 0.54) * (boosting ? 1.24 : 1.0);
+    const baseOuterWidth = (3.2 + machNorm * 6.8) * (boosting ? 1.38 : 1.0);
+    const baseCoreWidth = (1.1 + machNorm * 2.4) * (boosting ? 1.32 : 1.0);
 
     const drawRibbon = (
       channel: 'left' | 'right' | 'center',
       widthScale: number,
       alphaScale: number,
     ) => {
+      const isCenter = channel === 'center';
+      const outerR = isCenter ? centerOuterR : wingOuterR;
+      const outerG = isCenter ? centerOuterG : wingOuterG;
+      const outerB = isCenter ? centerOuterB : wingOuterB;
+      const coreR = isCenter ? centerCoreR : wingCoreR;
+      const coreG = isCenter ? centerCoreG : wingCoreG;
+      const coreB = isCenter ? centerCoreB : wingCoreB;
+
       let validCount = 0;
       for (let step = 0; step < desiredSegments; step++) {
         const ringIdx = (this.trailHead - 1 - step + FX_TRAIL_CAPACITY) % FX_TRAIL_CAPACITY;
@@ -1039,10 +1157,10 @@ export class MarsFlightEngine {
         if (segLenSq > w * w * 0.35) continue;
 
         const t = step / (desiredSegments - 1); // 0 at craft -> 1 at tail tip
-        const fade = Math.pow(1 - t, 1.65);
+        const fade = Math.pow(1 - t, 1.6);
 
-        // Pass 1: Luminous Mach-colored plasma glow halo
-        const outerAlpha = Math.min(0.92, baseOpacity * alphaScale * fade * 0.62);
+        // Pass 1: Luminous plasma glow halo (fiery crimson-red on center exhaust during boost, cool Mach cyan on wingtips)
+        const outerAlpha = Math.min(0.92, baseOpacity * alphaScale * fade * (boosting && isCenter ? 0.86 : 0.6));
         if (outerAlpha > 0.01) {
           ctx.strokeStyle = `rgba(${outerR}, ${outerG}, ${outerB}, ${outerAlpha.toFixed(3)})`;
           ctx.lineWidth = Math.max(0.6, baseOuterWidth * widthScale * (0.2 + 0.8 * fade));
@@ -1052,8 +1170,8 @@ export class MarsFlightEngine {
           ctx.stroke();
         }
 
-        // Pass 2: White-hot supersonic filament core
-        const coreAlpha = Math.min(0.95, baseOpacity * alphaScale * fade * 0.88);
+        // Pass 2: Vivid electric-blue / white-hot supersonic filament core
+        const coreAlpha = Math.min(0.96, baseOpacity * alphaScale * fade * 0.92);
         if (coreAlpha > 0.015) {
           ctx.strokeStyle = `rgba(${coreR}, ${coreG}, ${coreB}, ${coreAlpha.toFixed(3)})`;
           ctx.lineWidth = Math.max(0.4, baseCoreWidth * widthScale * (0.18 + 0.82 * fade));
@@ -1070,7 +1188,7 @@ export class MarsFlightEngine {
     // Draw port & starboard Mach wingtip trails + intense center thruster slipstream path
     drawRibbon('left', 0.95, 0.95);
     drawRibbon('right', 0.95, 0.95);
-    drawRibbon('center', boosting ? 1.55 : 1.15, boosting ? 0.95 : 0.68);
+    drawRibbon('center', boosting ? 1.85 : 1.15, boosting ? 1.05 : 0.68);
   }
 
   /**
@@ -1092,10 +1210,14 @@ export class MarsFlightEngine {
     if (this.gateWindBurstTimer > 0) {
       this.gateWindBurstTimer = Math.max(0, this.gateWindBurstTimer - dt);
     }
+    const diffCfg = getDifficultyConfig(this.difficulty);
     const mach = this.flight.mach;
     const boostExtra = this.flight.isBoosting ? 0.38 : 0;
     const gateExtra = this.gateWindBurstTimer > 0 ? 0.42 * Math.min(1, this.gateWindBurstTimer) : 0;
-    const rawIntensity = Math.max(0, Math.min(1, (mach - 1.0) / 2.2 + boostExtra + gateExtra));
+    const rawIntensity = Math.max(
+      0,
+      Math.min(1, ((mach - 1.0) / 2.2) * diffCfg.windStreakMultiplier + boostExtra + gateExtra),
+    );
     const intensity = this.phase === 'title' ? rawIntensity * 0.45 : rawIntensity;
 
     // 1. Draw Mach-reactive luminous aircraft trails projected onto fxCanvasRef (hidden in cockpit view for crisp glass)
@@ -1107,7 +1229,7 @@ export class MarsFlightEngine {
     const cy = h * 0.48;
     const maxRadius = Math.hypot(cx, cy);
 
-    // 2. Subtle high-speed radial peripheral motion-blur edge vignette
+    // 2. Subtle high-speed radial peripheral motion-blur edge vignette (deep crimson edge pulse on Hard / Boost)
     if (intensity > 0.08) {
       const grad = ctx.createRadialGradient(
         cx,
@@ -1118,19 +1240,27 @@ export class MarsFlightEngine {
         maxRadius * 1.03,
       );
       grad.addColorStop(0, 'rgba(255, 196, 150, 0)');
-      grad.addColorStop(0.75, `rgba(232, 118, 56, ${(intensity * 0.075).toFixed(3)})`);
-      grad.addColorStop(1, `rgba(18, 7, 4, ${(intensity * 0.24).toFixed(3)})`);
+      if (this.difficulty === 'hard' || this.flight.isBoosting) {
+        grad.addColorStop(0.75, `rgba(220, 42, 46, ${(intensity * 0.095).toFixed(3)})`);
+      } else {
+        grad.addColorStop(0.75, `rgba(232, 118, 56, ${(intensity * 0.075).toFixed(3)})`);
+      }
+      grad.addColorStop(1, `rgba(18, 5, 4, ${(intensity * 0.25).toFixed(3)})`);
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, w, h);
     }
 
-    // 3. Rushing wind streaks along the screen periphery (intensifies on afterburners & Speed Gate surges!)
-    const activeCount = Math.floor(18 + intensity * (this.windStreaks.length - 18));
+    // 3. Rushing wind streaks along the screen periphery (intensifies on Hard, afterburners & Speed Gate surges!)
+    const activeCount = Math.min(
+      this.windStreaks.length,
+      Math.floor((18 + intensity * (this.windStreaks.length - 18)) * Math.min(1.25, diffCfg.windStreakMultiplier)),
+    );
     const travelRate =
-      1.45 +
-      mach * 0.85 +
-      (this.flight.isBoosting ? 1.2 : 0) +
-      (this.gateWindBurstTimer > 0 ? 1.35 : 0);
+      (1.45 +
+        mach * 0.85 +
+        (this.flight.isBoosting ? 1.25 : 0) +
+        (this.gateWindBurstTimer > 0 ? 1.35 : 0)) *
+      (0.85 + diffCfg.windStreakMultiplier * 0.22);
 
     ctx.lineCap = 'round';
     for (let i = 0; i < activeCount; i++) {
@@ -1159,9 +1289,18 @@ export class MarsFlightEngine {
         this.gateWindBurstTimer > 0
           ? `rgba(195, 252, 255, ${Math.min(0.95, alpha * 1.2).toFixed(3)})`
           : this.flight.isBoosting
-            ? `rgba(216, 246, 255, ${alpha.toFixed(3)})`
-            : `rgba(255, 245, 236, ${alpha.toFixed(3)})`;
-      ctx.lineWidth = this.flight.isBoosting || this.gateWindBurstTimer > 0 ? 1.9 : 1.35;
+            ? i % 3 === 0
+              ? `rgba(255, 118, 128, ${Math.min(0.92, alpha * 1.1).toFixed(3)})`
+              : `rgba(186, 240, 255, ${alpha.toFixed(3)})`
+            : this.difficulty === 'hard'
+              ? `rgba(255, 224, 214, ${Math.min(0.92, alpha * 1.12).toFixed(3)})`
+              : `rgba(255, 245, 236, ${alpha.toFixed(3)})`;
+      ctx.lineWidth =
+        this.flight.isBoosting || this.gateWindBurstTimer > 0
+          ? 2.0
+          : this.difficulty === 'hard'
+            ? 1.6
+            : 1.35;
       ctx.beginPath();
       ctx.moveTo(x1, y1);
       ctx.lineTo(x2, y2);
@@ -1176,14 +1315,17 @@ export class MarsFlightEngine {
       Math.min(1, (mach - 1.05) / 2.2 + (this.flight.isBoosting ? 0.3 : 0)),
     );
     const zone = getZoneInfoAtZ(this.flight.z);
+    const rec = this.records[this.difficulty];
     this.callbacks.onTelemetry({
+      difficulty: this.difficulty,
       mach,
       speedMetersPerSec: computeSpeedFromMach(mach),
       altitude: Math.max(0, Math.round(this.flight.y)),
       distance: Math.round(this.flight.distance),
       score: Math.round(this.flight.score),
-      bestScore: Math.round(Math.max(this.bestScore, this.flight.score)),
-      bestMach: Math.max(this.bestMach, this.flight.peakMach),
+      bestScore: Math.round(Math.max(rec.bestScore, this.flight.score)),
+      bestDistance: Math.round(Math.max(rec.bestDistance, this.flight.distance)),
+      bestMach: Math.max(rec.bestMach, this.flight.peakMach),
       nearMissCount: this.flight.nearMissCount,
       boostCharge: this.flight.boostCharge,
       isBoosting: this.flight.isBoosting,
@@ -1203,25 +1345,36 @@ export class MarsFlightEngine {
 
   private finishGameOver(): void {
     const finalScore = Math.round(this.flight.score);
+    const finalDistance = Math.round(this.flight.distance);
     const peakMach = Number(this.flight.peakMach.toFixed(2));
-    const isNewBestScore = finalScore > this.bestScore;
-    const isNewBestMach = peakMach > this.bestMach;
+    const rec = this.records[this.difficulty];
 
-    if (isNewBestScore) this.bestScore = finalScore;
-    if (isNewBestMach) this.bestMach = peakMach;
-    if (isNewBestScore || isNewBestMach) this.saveRecords();
+    const isNewBestScore = finalScore > rec.bestScore;
+    const isNewBestMach = peakMach > rec.bestMach;
+    const isNewBestDistance = finalDistance > rec.bestDistance;
+
+    if (isNewBestScore) rec.bestScore = finalScore;
+    if (isNewBestMach) rec.bestMach = peakMach;
+    if (isNewBestDistance) rec.bestDistance = finalDistance;
+    if (isNewBestScore || isNewBestMach || isNewBestDistance) {
+      this.saveRecords();
+      this.callbacks.onDifficultyChange(this.difficulty, this.cloneRecords());
+    }
 
     const summary: RunSummary = {
+      difficulty: this.difficulty,
       score: finalScore,
-      bestScore: Math.round(this.bestScore),
+      bestScore: Math.round(rec.bestScore),
       peakMach,
-      bestMach: Number(this.bestMach.toFixed(2)),
-      distance: Math.round(this.flight.distance),
+      bestMach: Number(rec.bestMach.toFixed(2)),
+      distance: finalDistance,
+      bestDistance: Math.round(rec.bestDistance),
       nearMissCount: this.flight.nearMissCount,
       gatesPassed: this.flight.gatesPassed,
       survivalSeconds: Math.round(this.flight.survivalSeconds),
       isNewBestScore,
       isNewBestMach,
+      isNewBestDistance,
     };
 
     this.setPhase('gameover');

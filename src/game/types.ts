@@ -1,5 +1,15 @@
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
+export type DifficultyId = 'easy' | 'medium' | 'hard';
+
+export interface DifficultyRecord {
+  bestScore: number;
+  bestDistance: number;
+  bestMach: number;
+}
+
+export type AllDifficultyRecords = Record<DifficultyId, DifficultyRecord>;
+
 export type MartianZoneId = 'plains' | 'canyon' | 'colony' | 'volcanic';
 
 export type CameraViewMode = 'chase' | 'cockpit' | 'wing' | 'cinematic';
@@ -69,12 +79,14 @@ export interface ControlInput {
 }
 
 export interface FlightTelemetry {
+  difficulty: DifficultyId;
   mach: number;
   speedMetersPerSec: number;
   altitude: number;
   distance: number;
   score: number;
   bestScore: number;
+  bestDistance: number;
   bestMach: number;
   nearMissCount: number;
   boostCharge: number; // 0..1
@@ -96,16 +108,19 @@ export interface FlightTelemetry {
 }
 
 export interface RunSummary {
+  difficulty: DifficultyId;
   score: number;
   bestScore: number;
   peakMach: number;
   bestMach: number;
   distance: number;
+  bestDistance: number;
   nearMissCount: number;
   gatesPassed: number;
   survivalSeconds: number;
   isNewBestScore: boolean;
   isNewBestMach: boolean;
+  isNewBestDistance: boolean;
 }
 
 export interface HudBannerEvent {

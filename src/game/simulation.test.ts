@@ -493,3 +493,116 @@ test('Smart Autoplay navigates all 4 zones, uses strategic boost bursts without 
   assert.ok(state.gatesPassed >= 16, `Autoplay should actively hunt Speed Gates safely, passed ${state.gatesPassed}`);
   assert.ok(maxMultiplier >= 3, `Autoplay should chain consecutive Speed Gates for x3+ multiplier, got x${maxMultiplier}`);
 });
+
+test('3-tier difficulty scales obstacle density, breathers, Mach speed, score multiplier, and keeps all Speed Gates safe', () => {
+  const counts = { easy: 0, medium: 0, hard: 0 };
+  const breathers = { easy: 0, medium: 0, hard: 0 };
+
+  for (const diff of ['easy', 'medium', 'hard'] as const) {
+    for (let c = 0; c < CHUNKS_PER_ZONE * 2; c++) {
+      if (isBreatherChunk(c, diff)) breathers[diff]++;
+      const obs = getObstaclesForChunk(c, diff);
+      counts[diff] += obs.length;
+
+      const gates = getSpeedGatesForChunk(c, diff);
+      for (const gate of gates) {
+        const cx = getCanyonCenterX(gate.z, diff);
+        const hw = getCanyonHalfWidth(gate.z, diff);
+        assert.ok(
+          Math.abs(gate.x - cx) <= hw - gate.radius - 1.5,
+          `${diff} gate ${gate.id} too close to canyon wall`,
+        );
+        const groundY = getTerrainHeight(gate.x, gate.z, diff);
+        assert.ok(gate.y >= groundY + 7.5, `${diff} gate ${gate.id} too close to terrain`);
+        for (const o of obs) {
+          if (o.kind === 'dust-devil') continue;
+          const clr = evaluateObstacleClearance(gate.x, gate.y, gate.z, o, 1.15);
+          assert.ok(
+            clr > 3.5,
+            `${diff} gate ${gate.id} overlaps obstacle ${o.id} (${o.kind}): clr=${clr.toFixed(1)}`,
+          );
+        }
+      }
+    }
+  }
+
+  assert.ok(
+    counts.medium > counts.easy * 1.45,
+    `Medium should pack noticeably more hazards than Easy (${counts.medium} vs ${counts.easy})`,
+  );
+  assert.ok(
+    counts.hard > counts.medium * 1.3,
+    `Hard should be a dense gauntlet far exceeding Medium (${counts.hard} vs ${counts.medium})`,
+  );
+  assert.ok(breathers.easy > breathers.medium, `Easy breathers (${breathers.easy}) should exceed Medium (${breathers.medium})`);
+  assert.equal(breathers.hard, 0, 'Hard mode should have relentless obstacles with 0 empty breathers');
+
+  // Verify Mach start & score multiplier progression across tiers
+  let easyState = createInitialFlightState('easy');
+  let medState = createInitialFlightState('medium');
+  let hardState = createInitialFlightState('hard');
+  assert.ok(hardState.mach > medState.mach && medState.mach > easyState.mach);
+
+  for (let i = 0; i < 120; i++) {
+    easyState = stepFlightSimulation(easyState, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    }).state;
+    medState = stepFlightSimulation(medState, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    }).state;
+    hardState = stepFlightSimulation(hardState, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    }).state;
+  }
+  assert.ok(hardState.score > medState.score && medState.score > easyState.score);
+  assert.ok(hardState.mach > medState.mach && medState.mach > easyState.mach);
+});
+
+test('Elite Autoplay cleanly survives 60s Medium and 90s relentless Hard gauntlets with 0 crashes and strategic boost', () => {
+  // Medium 60s verification
+  let med = createInitialFlightState('medium');
+  let medOverheats = 0;
+  for (let i = 0; i < 3600; i++) {
+    const res = stepFlightSimulation(med, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      gameplayAutoplay: true,
+    });
+    med = res.state;
+    if (res.events.boostOverheated) medOverheats++;
+    assert.equal(med.crashed, false, `Medium Autoplay crashed at frame ${i} (z=${med.z.toFixed(1)})`);
+  }
+  assert.equal(medOverheats, 0, 'Medium Autoplay must not overheat');
+  assert.ok(med.peakMach >= 2.7, `Medium Autoplay should reach high Mach, got ${med.peakMach.toFixed(2)}`);
+
+  // Hard 90s relentless multi-zone gauntlet verification (5400 frames)
+  let hard = createInitialFlightState('hard');
+  let hardOverheats = 0;
+  let hardBoostBursts = 0;
+  let maxHardRoll = 0;
+  const hardZones = new Set<MartianZoneId>([hard.currentZoneId]);
+
+  for (let i = 0; i < 5400; i++) {
+    const res = stepFlightSimulation(hard, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      gameplayAutoplay: true,
+    });
+    hard = res.state;
+    if (res.events.boostOverheated) hardOverheats++;
+    if (res.events.boostStarted) hardBoostBursts++;
+    if (Math.abs(hard.roll) > maxHardRoll) maxHardRoll = Math.abs(hard.roll);
+    if (res.events.zoneChanged) hardZones.add(res.events.zoneChanged.id);
+    assert.equal(
+      hard.crashed,
+      false,
+      `Hard Autoplay crashed at frame ${i} (zone=${hard.currentZoneId}, z=${hard.z.toFixed(1)}, x=${hard.x.toFixed(1)}, y=${hard.y.toFixed(1)})`,
+    );
+  }
+
+  assert.equal(hardOverheats, 0, 'Elite Hard Autoplay must never overheat');
+  assert.ok(hard.peakMach >= 3.0, `Hard Autoplay should push extreme Mach >= 3.0, got ${hard.peakMach.toFixed(2)}`);
+  assert.ok(hardBoostBursts >= 2, `Hard Autoplay should fire strategic boost bursts in clean openings, got ${hardBoostBursts}`);
+  assert.ok(maxHardRoll > 0.2, 'Hard Autoplay should bank decisively through tight gauntlets');
+  assert.ok(hardZones.size >= 3, `Hard Autoplay should blast through multiple Martian zones, visited ${[...hardZones].join(', ')}`);
+});
+

@@ -1,11 +1,18 @@
 import React from 'react';
-import type { RunSummary } from '../game/types';
+import { DIFFICULTY_CONFIGS, DIFFICULTY_ORDER } from '../game/difficulty';
+import type { DifficultyId, RunSummary } from '../game/types';
 
 interface PauseModalProps {
   onResume: () => void;
   onRestart: () => void;
   onTitle: () => void;
 }
+
+const SUMMARY_DIFFICULTY_STYLES: Record<DifficultyId, string> = {
+  easy: 'border-[#38bdf8]/65 bg-[#0a2f42]/90 text-[#7dd3fc]',
+  medium: 'border-[#fbbf24]/65 bg-[#3b1f06]/90 text-[#fcd34d]',
+  hard: 'border-[#fb4b5c]/75 bg-[#450c14]/92 text-[#fda4af]',
+};
 
 export const PauseModal: React.FC<PauseModalProps> = ({ onResume, onRestart, onTitle }) => {
   return (
@@ -58,15 +65,22 @@ export const PauseModal: React.FC<PauseModalProps> = ({ onResume, onRestart, onT
 
 interface GameOverModalProps {
   summary: RunSummary;
+  selectedDifficulty: DifficultyId;
+  onSelectDifficulty: (difficulty: DifficultyId) => void;
   onRestart: () => void;
   onTitle: () => void;
 }
 
 export const GameOverModal: React.FC<GameOverModalProps> = ({
   summary,
+  selectedDifficulty,
+  onSelectDifficulty,
   onRestart,
   onTitle,
 }) => {
+  const formatDistance = (d: number) =>
+    d >= 1000 ? `${(d / 1000).toFixed(1)}k` : `${d}m`;
+
   return (
     <div
       role="dialog"
@@ -75,9 +89,17 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
       className="fixed inset-0 z-30 flex items-center justify-center bg-[#120502]/72 p-4"
     >
       <div className="w-full max-w-md rounded-sm border border-[#ffd5b6]/28 bg-[#190905]/96 p-7 shadow-[0_24px_64px_rgba(10,3,1,0.85)]">
-        <p className="font-telemetry text-xs font-medium tracking-[0.2em] text-[#f97316] uppercase">
-          Hull Impact · Flight Complete
-        </p>
+        <div className="flex items-center justify-between gap-2">
+          <p className="font-telemetry text-xs font-medium tracking-[0.2em] text-[#f97316] uppercase">
+            Hull Impact · Flight Complete
+          </p>
+          <span
+            data-testid="summary-difficulty"
+            className={`font-display rounded-[2px] border px-2 py-0.5 text-[11px] font-bold tracking-[0.14em] uppercase ${SUMMARY_DIFFICULTY_STYLES[summary.difficulty]}`}
+          >
+            {DIFFICULTY_CONFIGS[summary.difficulty].label}
+          </span>
+        </div>
         <h2
           id="gameover-title"
           className="font-display mt-1 text-3xl sm:text-4xl font-bold tracking-[0.06em] text-[#fff6ee] uppercase"
@@ -86,7 +108,7 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
         </h2>
 
         {/* 3 crisp tabular-nums flight telemetry readouts */}
-        <div className="mt-6 grid grid-cols-3 gap-3 border-y border-[#ffd8bc]/14 py-5">
+        <div className="mt-5 grid grid-cols-3 gap-3 border-y border-[#ffd8bc]/14 py-4">
           <div>
             <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#7dd3fc] uppercase">
               Peak Mach
@@ -107,12 +129,12 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
               Distance
             </div>
             <div className="font-telemetry mt-1 text-2xl sm:text-3xl font-bold text-[#fff6ee]">
-              {summary.distance >= 1000
-                ? `${(summary.distance / 1000).toFixed(1)}k`
-                : `${summary.distance}m`}
+              {formatDistance(summary.distance)}
             </div>
             <div className="font-telemetry mt-0.5 text-[11px] text-[#f5cbb0]/70">
-              {summary.survivalSeconds}s flight
+              {summary.isNewBestDistance
+                ? 'New Record'
+                : `Best ${formatDistance(summary.bestDistance)}`}
             </div>
           </div>
 
@@ -147,8 +169,46 @@ export const GameOverModal: React.FC<GameOverModalProps> = ({
           </div>
         </div>
 
+        {/* Instant Change Difficulty toggle right before Fly Again */}
+        <div className="mt-5 border-t border-[#ffd8bc]/12 pt-4">
+          <div className="flex items-center justify-between">
+            <span className="font-telemetry text-[11px] font-medium tracking-[0.16em] text-[#f5cbb0]/80 uppercase">
+              Change Difficulty
+            </span>
+            <span className="font-telemetry text-[10px] text-[#f5cbb0]/60">
+              {DIFFICULTY_CONFIGS[selectedDifficulty].preview}
+            </span>
+          </div>
+          <div
+            role="radiogroup"
+            aria-label="Change difficulty for next flight"
+            className="mt-2 grid grid-cols-3 gap-2"
+          >
+            {DIFFICULTY_ORDER.map((id) => {
+              const selected = selectedDifficulty === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  data-testid={`gameover-difficulty-${id}`}
+                  onClick={() => onSelectDifficulty(id)}
+                  className={`font-display rounded-sm border py-1.5 text-xs font-bold tracking-[0.14em] uppercase transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer ${
+                    selected
+                      ? SUMMARY_DIFFICULTY_STYLES[id]
+                      : 'border-[#ffd8bc]/18 bg-[#240d07] text-[#f5cbb0]/70 hover:border-[#ffd8bc]/40 hover:text-[#fff6ee]'
+                  }`}
+                >
+                  {DIFFICULTY_CONFIGS[id].label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Primary actions */}
-        <div className="mt-7 flex items-center gap-3">
+        <div className="mt-5 flex items-center gap-3">
           <button
             type="button"
             data-start="true"
