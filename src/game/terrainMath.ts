@@ -1,8 +1,41 @@
-import type { CanyonObstacle } from './types';
+import type { CanyonObstacle, MartianZoneId, MartianZoneInfo } from './types';
 
 export const CHUNK_LENGTH = 340;
-export const TERRAIN_WIDTH = 520;
-export const SAFE_START_DISTANCE = 620; // Wide, gentle opening canyon runway
+export const TERRAIN_WIDTH = 560;
+export const SAFE_START_DISTANCE = 540;
+/** 18 chunks * 340m = 6,120m (~30-40 seconds at Mach 1.5-1.9) per distinct Martian zone */
+export const CHUNKS_PER_ZONE = 18;
+export const ZONE_LENGTH = CHUNKS_PER_ZONE * CHUNK_LENGTH;
+
+export const MARTIAN_ZONES: readonly MartianZoneInfo[] = [
+  {
+    id: 'plains',
+    name: 'Wide Open Red Plains',
+    subtitle: 'Sun-scorched ochre basins & drifting dust funnels',
+  },
+  {
+    id: 'canyon',
+    name: 'Deep Winding Slot Canyons',
+    subtitle: 'Towering crimson walls, split tunnels & overhangs',
+  },
+  {
+    id: 'colony',
+    name: 'Abandoned Colony Valley',
+    subtitle: 'Rusted comm towers, broken viaducts & solar arrays',
+  },
+  {
+    id: 'volcanic',
+    name: 'Jagged Volcanic Peaks',
+    subtitle: 'Dark basalt ridges, caldera spires & ash vortices',
+  },
+] as const;
+
+export interface ZoneBlendWeights {
+  plains: number;
+  canyon: number;
+  colony: number;
+  volcanic: number;
+}
 
 /** Deterministic hash in [0, 1) */
 export function hash2D(ix: number, iz: number): number {
@@ -62,48 +95,100 @@ export function ridgedNoise2D(x: number, z: number): number {
   return value;
 }
 
-/**
- * Center X coordinate of the winding Martian canyon at world Z (flight moves toward -Z).
- * Uses broad, sweeping, enjoyable curves instead of sharp sudden turns.
- */
-export function getCanyonCenterX(z: number): number {
-  const dist = Math.max(0, -z);
-  const ramp = smoothstep(SAFE_START_DISTANCE * 0.78, SAFE_START_DISTANCE * 1.9, dist);
-  const curve =
-    Math.sin(dist * 0.00125) * 46 +
-    Math.sin(dist * 0.0026 + 1.1) * 18 +
-    Math.cos(dist * 0.00072 - 0.4) * 24;
-  return curve * ramp;
-}
-
-/**
- * Generously wide flyable canyon ramp half-width at world Z.
- * Starts at ~66m half-width (132m wide canyon!) and narrows very gently to ~52m (104m wide).
- */
-export function getCanyonHalfWidth(z: number): number {
-  const dist = Math.max(0, -z);
-  const difficultyTighten = Math.min(14, dist * 0.00028);
-  const organicBreath = Math.sin(dist * 0.0042 + 0.4) * 4.5;
-  return 66 - difficultyTighten + organicBreath;
-}
-
-/** Smoothly rolling dusty Martian canyon floor elevation */
-export function getValleyFloorHeight(x: number, z: number): number {
-  const dist = Math.max(0, -z);
-  const dune = (fbm2D(x * 0.014, z * 0.014) - 0.5) * 3.0;
-  const swell = Math.sin(dist * 0.0032) * 1.8;
-  return 1.5 + dune + swell;
-}
-
 /** Smoothstep helper */
 export function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
 }
 
+/** Returns the active Martian Zone metadata for a given world Z (flight moves toward -Z). */
+export function getZoneInfoAtZ(z: number): MartianZoneInfo {
+  const dist = Math.max(0, -z);
+  const zoneIdx = Math.floor(dist / ZONE_LENGTH) % MARTIAN_ZONES.length;
+  return MARTIAN_ZONES[zoneIdx];
+}
+
+export function getZoneIdAtChunk(chunkIndex: number): MartianZoneId {
+  const safeIdx = Math.max(0, chunkIndex);
+  const zoneIdx = Math.floor(safeIdx / CHUNKS_PER_ZONE) % MARTIAN_ZONES.length;
+  return MARTIAN_ZONES[zoneIdx].id;
+}
+
+/**
+ * Smoothly blends between adjacent Martian zones over a 900m transition window
+ * so canyon width, mountain silhouette, and palette morph seamlessly with zero seams.
+ */
+export function getZoneWeightsAtZ(z: number): ZoneBlendWeights {
+  const dist = Math.max(0, -z);
+  const exactZone = dist / ZONE_LENGTH;
+  const idx = Math.floor(exactZone) % MARTIAN_ZONES.length;
+  const nextIdx = (idx + 1) % MARTIAN_ZONES.length;
+  const localDist = dist - Math.floor(exactZone) * ZONE_LENGTH;
+
+  const transitionSpan = 900;
+  const blend = smoothstep(ZONE_LENGTH - transitionSpan, ZONE_LENGTH, localDist);
+
+  const weights: ZoneBlendWeights = {
+    plains: 0,
+    canyon: 0,
+    colony: 0,
+    volcanic: 0,
+  };
+  weights[MARTIAN_ZONES[idx].id] += 1 - blend;
+  weights[MARTIAN_ZONES[nextIdx].id] += blend;
+  return weights;
+}
+
+/**
+ * Center X coordinate of the Martian flight route at world Z (moves toward -Z).
+ * Sweeps gently on Open Plains / Colony Valley, winds more dramatically in Slot Canyons.
+ */
+export function getCanyonCenterX(z: number): number {
+  const dist = Math.max(0, -z);
+  const ramp = smoothstep(SAFE_START_DISTANCE * 0.72, SAFE_START_DISTANCE * 1.8, dist);
+  const w = getZoneWeightsAtZ(z);
+  const curveScale =
+    w.plains * 0.72 + w.canyon * 1.24 + w.colony * 0.85 + w.volcanic * 1.05;
+
+  const curve =
+    Math.sin(dist * 0.0012) * 48 +
+    Math.sin(dist * 0.0024 + 1.1) * 18 +
+    Math.cos(dist * 0.0007 - 0.4) * 24;
+  return curve * ramp * curveScale;
+}
+
+/**
+ * Generously wide flyable corridor half-width adapted per Martian zone:
+ * - Wide Open Red Plains: ~82m half-width (164m wide open basin!)
+ * - Deep Winding Slot Canyons: ~56m half-width (112m dramatic canyon corridor)
+ * - Abandoned Colony Valley: ~72m half-width (144m settlement basin)
+ * - Jagged Volcanic Peaks: ~62m half-width (124m volcanic valley)
+ */
+export function getCanyonHalfWidth(z: number): number {
+  const dist = Math.max(0, -z);
+  const w = getZoneWeightsAtZ(z);
+  const baseWidth =
+    w.plains * 82 + w.canyon * 56 + w.colony * 72 + w.volcanic * 62;
+
+  const gentleTighten = Math.min(7, dist * 0.00014);
+  const organicBreath = Math.sin(dist * 0.0038 + 0.4) * 4.5;
+  return Math.max(48, baseWidth - gentleTighten + organicBreath);
+}
+
+/** Smoothly rolling dusty Martian floor elevation */
+export function getValleyFloorHeight(x: number, z: number): number {
+  const dist = Math.max(0, -z);
+  const w = getZoneWeightsAtZ(z);
+  const duneAmp = w.plains * 3.4 + w.canyon * 2.4 + w.colony * 2.2 + w.volcanic * 3.6;
+  const dune = (fbm2D(x * 0.014, z * 0.014) - 0.5) * duneAmp;
+  const swell = Math.sin(dist * 0.0032) * 1.8;
+  return 1.5 + dune + swell;
+}
+
 /**
  * Shared exact terrain height function at world (x, z).
- * Wide flat-to-gently-sloped ramp in the center, rising into towering stratified Martian canyon cliffs.
+ * Adapts smoothly across all 4 Martian zones (broad low-rim mesas on Red Plains,
+ * steep towering walls in Slot Canyons, terraced colony valley, jagged volcanic peaks).
  */
 export function getTerrainHeight(x: number, z: number): number {
   const centerX = getCanyonCenterX(z);
@@ -112,182 +197,594 @@ export function getTerrainHeight(x: number, z: number): number {
 
   const floorY = getValleyFloorHeight(x, z);
 
-  // Generous wide canyon floor & smooth banked ramp apron before the steep cliffs rise
+  // Generous wide valley floor before flanking terrain rises
   const wallT = smoothstep(halfWidth * 0.78, halfWidth * 1.48, dx);
   if (wallT <= 0.0001) {
     return floorY;
   }
 
-  // Towering Martian cliff walls rising to 55-150m on both flanks
-  const outerT = smoothstep(halfWidth * 1.18, halfWidth * 2.55, dx);
+  const w = getZoneWeightsAtZ(z);
+  const outerT = smoothstep(halfWidth * 1.15, halfWidth * 2.5, dx);
   const ridge = ridgedNoise2D(x * 0.011, z * 0.011);
   const detail = fbm2D(x * 0.032, z * 0.032);
 
-  const rawCliff = wallT * (52 + ridge * 58) + outerT * (40 + ridge * 54) + detail * 10 * wallT;
+  // Zone-specific mountain/cliff scale
+  const cliffScale =
+    w.plains * 0.68 + w.canyon * 1.28 + w.colony * 0.88 + w.volcanic * 1.32;
+  const jaggedBoost = w.volcanic * 32 * ridge * ridge + w.canyon * 16 * ridge;
 
-  // Realistic sedimentary Martian rock terracing
+  const rawCliff =
+    (wallT * (48 + ridge * 56) + outerT * (38 + ridge * 52) + jaggedBoost) * cliffScale +
+    detail * 10 * wallT;
+
+  // Realistic sedimentary terracing (stronger in Slot Canyons & Plains, sharper crags in Volcanic)
+  const terraceWeight = w.plains * 0.45 + w.canyon * 0.52 + w.colony * 0.4 + w.volcanic * 0.16;
   const terraceStep = 14;
   const terraced =
     Math.floor(rawCliff / terraceStep) * terraceStep +
     smoothstep(0.18, 0.85, (rawCliff % terraceStep) / terraceStep) * terraceStep;
 
-  const cliffHeight = rawCliff * 0.55 + terraced * 0.45;
+  const cliffHeight = rawCliff * (1 - terraceWeight) + terraced * terraceWeight;
   return floorY + cliffHeight;
 }
 
+/** Computes live sideways X coordinate of a drifting Martian dust devil at simulation time t */
+export function getDustDevilX(obs: CanyonObstacle, worldTime: number): number {
+  const amp = obs.driftAmp ?? 0;
+  const speed = obs.driftSpeed ?? 0;
+  const phase = obs.driftPhase ?? 0;
+  return obs.x + Math.sin(worldTime * speed + phase) * amp;
+}
+
 /**
- * Deterministic canyon landmarks & obstacles for chunk index k (chunk covers z in [-k*L, -(k+1)*L]).
- * Generously spaced so players have wide sightlines and comfortable maneuvering corridors.
+ * Returns true if a chunk is an intentional open-sky breather stretch (~4 seconds of clear sky
+ * between intense obstacle clusters, plus right at zone entrances so transitions breathe naturally).
+ */
+export function isBreatherChunk(chunkIndex: number): boolean {
+  if (chunkIndex < 3) return false;
+  const posInZone = chunkIndex % CHUNKS_PER_ZONE;
+  // Breather stretch on zone transitions (pos 0 & 17 -> ~680m ≈ 4s clear sky!) and every 4th-5th chunk inside a zone
+  return posInZone === 0 || posInZone === 4 || posInZone === 9 || posInZone === 14;
+}
+
+/**
+ * Deterministic handcrafted Martian landmarks & varied obstacles per 340m chunk.
+ * Tailored to each of the 4 Martian zones with breathing stretches between intense clusters.
  */
 export function getObstaclesForChunk(chunkIndex: number): CanyonObstacle[] {
   if (chunkIndex < 0) return [];
   const obstacles: CanyonObstacle[] = [];
   const zStart = -chunkIndex * CHUNK_LENGTH;
 
-  // Chunk 0: Iconic grand Martian rock arch framed dead ahead with wide open clearance
+  // --- Opening Showcase Sequence (Chunks 0..2): Immediate excitement & variety right from launch! ---
   if (chunkIndex === 0) {
-    const archZ = -255;
+    // Iconic Giant Natural Stone Arch you can fly under OR climb over, plus a rusted colony comm tower on the flank
+    const archZ = -235;
     const cx = getCanyonCenterX(archZ);
+    const hw = getCanyonHalfWidth(archZ);
     obstacles.push({
-      id: `arch-0`,
+      id: 'arch-0',
       kind: 'arch',
       x: cx,
       y: getValleyFloorHeight(cx, archZ) - 2,
       z: archZ,
       radius: 48,
-      height: 50,
-      thickness: 8.5,
-      yaw: 0.05,
+      height: 44,
+      thickness: 8.2,
+      yaw: 0.04,
       tint: 0.45,
+    });
+    const towerZ = -135;
+    const tcx = getCanyonCenterX(towerZ);
+    obstacles.push({
+      id: 'comm-0',
+      kind: 'comm-tower',
+      x: tcx + hw * 0.52,
+      y: getValleyFloorHeight(tcx + hw * 0.52, towerZ) - 1,
+      z: towerZ,
+      radius: 4.4,
+      height: 56,
+      thickness: 4.4,
+      yaw: -0.22,
+      tint: 0.6,
+      side: 1,
     });
     return obstacles;
   }
 
-  // Chunk 1: Wide scenic opening canyon with two distant flanking rock monoliths
   if (chunkIndex === 1) {
-    const z1 = zStart - 135;
+    // Low jagged ridge (climb high!) + giant tilted solar array + drifting red dust devil
+    const ridgeZ = zStart - 135;
+    const rcx = getCanyonCenterX(ridgeZ);
+    const rhw = getCanyonHalfWidth(ridgeZ);
+    obstacles.push({
+      id: 'ridge-1',
+      kind: 'low-ridge',
+      x: rcx,
+      y: getValleyFloorHeight(rcx, ridgeZ) - 2,
+      z: ridgeZ,
+      radius: rhw * 0.85,
+      height: 15.5,
+      thickness: 14,
+      yaw: 0.06,
+      tint: 0.55,
+    });
+
+    const solarZ = zStart - 275;
+    const scx = getCanyonCenterX(solarZ);
+    const shw = getCanyonHalfWidth(solarZ);
+    obstacles.push({
+      id: 'solar-1',
+      kind: 'solar-array',
+      x: scx - shw * 0.42,
+      y: getValleyFloorHeight(scx - shw * 0.42, solarZ) - 1,
+      z: solarZ,
+      radius: 13,
+      height: 28,
+      thickness: 3.5,
+      yaw: 0.32,
+      tint: 0.4,
+      side: -1,
+    });
+    return obstacles;
+  }
+
+  if (chunkIndex === 2) {
+    // Split Canyon Path (massive central pillar: pick left or right!) + drifting red dust devil
+    const splitZ = zStart - 120;
+    const scx = getCanyonCenterX(splitZ);
+    obstacles.push({
+      id: 'split-2',
+      kind: 'split-pillar',
+      x: scx,
+      y: getValleyFloorHeight(scx, splitZ) - 3,
+      z: splitZ,
+      radius: 14.5,
+      height: 82,
+      thickness: 17,
+      yaw: 0.2,
+      tint: 0.5,
+    });
+
+    const devilZ = zStart - 275;
+    const dcx = getCanyonCenterX(devilZ);
+    const dhw = getCanyonHalfWidth(devilZ);
+    obstacles.push({
+      id: 'devil-2',
+      kind: 'dust-devil',
+      x: dcx,
+      y: getValleyFloorHeight(dcx, devilZ) - 1,
+      z: devilZ,
+      radius: 7.5,
+      height: 68,
+      thickness: 7.5,
+      yaw: 0,
+      tint: 0.7,
+      driftAmp: Math.min(34, dhw * 0.46),
+      driftSpeed: 0.58,
+      driftPhase: 0.7,
+    });
+    return obstacles;
+  }
+
+  // Open-sky breather stretches between clusters (~4 seconds of scenic clear sky!)
+  if (isBreatherChunk(chunkIndex)) {
+    return [];
+  }
+
+  const zoneId = getZoneIdAtChunk(chunkIndex);
+  const seedBase = chunkIndex * 43.17;
+  const pattern = chunkIndex % 4;
+
+  // Helper to place an obstacle cleanly at chunk fraction
+  const zAt = (frac: number) => zStart - frac * CHUNK_LENGTH;
+
+  if (zoneId === 'plains') {
+    // WIDE OPEN RED PLAINS: arches (under/over), low jagged ridges (climb high), dust devils, occasional tilted solar panel
+    if (pattern === 1) {
+      const z1 = zAt(0.38);
+      const cx1 = getCanyonCenterX(z1);
+      obstacles.push({
+        id: `arch-${chunkIndex}`,
+        kind: 'arch',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1) - 2,
+        z: z1,
+        radius: 50,
+        height: 40 + hash1D(seedBase + 1) * 8,
+        thickness: 8.5,
+        yaw: (hash1D(seedBase + 2) - 0.5) * 0.2,
+        tint: hash1D(seedBase + 3),
+      });
+
+      const z2 = zAt(0.82);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      obstacles.push({
+        id: `devil-${chunkIndex}`,
+        kind: 'dust-devil',
+        x: cx2,
+        y: getValleyFloorHeight(cx2, z2) - 1,
+        z: z2,
+        radius: 7.8,
+        height: 70,
+        thickness: 7.8,
+        yaw: 0,
+        tint: 0.65,
+        driftAmp: Math.min(38, hw2 * 0.46),
+        driftSpeed: 0.52 + hash1D(seedBase + 4) * 0.25,
+        driftPhase: hash1D(seedBase + 5) * Math.PI * 2,
+      });
+    } else if (pattern === 2) {
+      const z1 = zAt(0.42);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      obstacles.push({
+        id: `ridge-${chunkIndex}`,
+        kind: 'low-ridge',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1) - 2,
+        z: z1,
+        radius: hw1 * 0.84,
+        height: 18 + hash1D(seedBase + 6) * 5,
+        thickness: 14,
+        yaw: (hash1D(seedBase + 7) - 0.5) * 0.16,
+        tint: hash1D(seedBase + 8),
+      });
+
+      const z2 = zAt(0.84);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      const side: -1 | 1 = chunkIndex % 2 === 0 ? 1 : -1;
+      obstacles.push({
+        id: `solar-${chunkIndex}`,
+        kind: 'solar-array',
+        x: cx2 + side * hw2 * 0.36,
+        y: getValleyFloorHeight(cx2 + side * hw2 * 0.36, z2) - 1,
+        z: z2,
+        radius: 13.5,
+        height: 30,
+        thickness: 3.6,
+        yaw: side * 0.36,
+        tint: hash1D(seedBase + 9),
+        side,
+      });
+    } else {
+      const z1 = zAt(0.36);
+      const cx1 = getCanyonCenterX(z1);
+      obstacles.push({
+        id: `split-${chunkIndex}`,
+        kind: 'split-pillar',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1) - 3,
+        z: z1,
+        radius: 14 + hash1D(seedBase + 10) * 3,
+        height: 78,
+        thickness: 16,
+        yaw: hash1D(seedBase + 11) * Math.PI,
+        tint: hash1D(seedBase + 12),
+      });
+
+      const z2 = zAt(0.8);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      const side: -1 | 1 = hash1D(seedBase + 13) > 0.5 ? 1 : -1;
+      obstacles.push({
+        id: `comm-${chunkIndex}`,
+        kind: 'comm-tower',
+        x: cx2 + side * hw2 * 0.45,
+        y: getValleyFloorHeight(cx2 + side * hw2 * 0.45, z2) - 1,
+        z: z2,
+        radius: 4.5,
+        height: 58,
+        thickness: 4.5,
+        yaw: -side * 0.24,
+        tint: 0.5,
+        side,
+      });
+    }
+    return obstacles;
+  }
+
+  if (zoneId === 'canyon') {
+    // DEEP WINDING SLOT CANYONS: overhanging cliff ledges (dive low!), split canyon pillars, giant stone arches
+    if (pattern === 1) {
+      const z1 = zAt(0.4);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      const side: -1 | 1 = chunkIndex % 2 === 0 ? -1 : 1;
+      obstacles.push({
+        id: `overhang-${chunkIndex}`,
+        kind: 'overhang',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1),
+        z: z1,
+        radius: hw1 * 0.92,
+        height: 29 + hash1D(seedBase + 1) * 5, // Clearance underside: dive below ~29-34m!
+        thickness: 22,
+        yaw: (hash1D(seedBase + 2) - 0.5) * 0.14,
+        tint: hash1D(seedBase + 3),
+        side,
+      });
+
+      const z2 = zAt(0.84);
+      const cx2 = getCanyonCenterX(z2);
+      obstacles.push({
+        id: `split-${chunkIndex}`,
+        kind: 'split-pillar',
+        x: cx2,
+        y: getValleyFloorHeight(cx2, z2) - 3,
+        z: z2,
+        radius: 13.5,
+        height: 88,
+        thickness: 16,
+        yaw: hash1D(seedBase + 4) * Math.PI,
+        tint: hash1D(seedBase + 5),
+      });
+    } else if (pattern === 2) {
+      const z1 = zAt(0.36);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      obstacles.push({
+        id: `arch-${chunkIndex}`,
+        kind: 'arch',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1) - 2,
+        z: z1,
+        radius: Math.max(36, hw1 * 0.78),
+        height: 38 + hash1D(seedBase + 6) * 8,
+        thickness: 8.5,
+        yaw: (hash1D(seedBase + 7) - 0.5) * 0.2,
+        tint: hash1D(seedBase + 8),
+      });
+
+      const z2 = zAt(0.82);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      obstacles.push({
+        id: `ridge-${chunkIndex}`,
+        kind: 'low-ridge',
+        x: cx2,
+        y: getValleyFloorHeight(cx2, z2) - 2,
+        z: z2,
+        radius: hw2 * 0.88,
+        height: 20,
+        thickness: 14,
+        yaw: 0.05,
+        tint: hash1D(seedBase + 9),
+      });
+    } else {
+      const z1 = zAt(0.45);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      const side: -1 | 1 = hash1D(seedBase + 10) > 0.5 ? 1 : -1;
+      obstacles.push({
+        id: `overhang-${chunkIndex}`,
+        kind: 'overhang',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1),
+        z: z1,
+        radius: hw1 * 0.9,
+        height: 30,
+        thickness: 22,
+        yaw: 0,
+        tint: hash1D(seedBase + 11),
+        side,
+      });
+    }
+    return obstacles;
+  }
+
+  if (zoneId === 'colony') {
+    // ABANDONED COLONY VALLEY: broken bridge spans, leaning rusted comm towers, giant tilted solar panels, drifting dust devils
+    if (pattern === 1) {
+      const z1 = zAt(0.38);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      obstacles.push({
+        id: `bridge-${chunkIndex}`,
+        kind: 'broken-bridge',
+        x: cx1,
+        y: getValleyFloorHeight(cx1, z1) - 1,
+        z: z1,
+        radius: Math.max(40, hw1 * 0.72),
+        height: 33 + hash1D(seedBase + 1) * 5,
+        thickness: 5.5,
+        yaw: (hash1D(seedBase + 2) - 0.5) * 0.14,
+        tint: hash1D(seedBase + 3),
+      });
+
+      const z2 = zAt(0.82);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      const side: -1 | 1 = chunkIndex % 2 === 0 ? 1 : -1;
+      obstacles.push({
+        id: `comm-${chunkIndex}`,
+        kind: 'comm-tower',
+        x: cx2 + side * hw2 * 0.28,
+        y: getValleyFloorHeight(cx2 + side * hw2 * 0.28, z2) - 1,
+        z: z2,
+        radius: 4.8,
+        height: 62,
+        thickness: 4.8,
+        yaw: -side * 0.26,
+        tint: hash1D(seedBase + 4),
+        side,
+      });
+    } else if (pattern === 2) {
+      const z1 = zAt(0.35);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      obstacles.push({
+        id: `solar-${chunkIndex}-a`,
+        kind: 'solar-array',
+        x: cx1 - hw1 * 0.34,
+        y: getValleyFloorHeight(cx1 - hw1 * 0.34, z1) - 1,
+        z: z1,
+        radius: 14,
+        height: 30,
+        thickness: 3.6,
+        yaw: 0.34,
+        tint: 0.35,
+        side: -1,
+      });
+
+      const z2 = zAt(0.76);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      obstacles.push({
+        id: `solar-${chunkIndex}-b`,
+        kind: 'solar-array',
+        x: cx2 + hw2 * 0.34,
+        y: getValleyFloorHeight(cx2 + hw2 * 0.34, z2) - 1,
+        z: z2,
+        radius: 14,
+        height: 30,
+        thickness: 3.6,
+        yaw: -0.34,
+        tint: 0.65,
+        side: 1,
+      });
+    } else {
+      const z1 = zAt(0.36);
+      const cx1 = getCanyonCenterX(z1);
+      const hw1 = getCanyonHalfWidth(z1);
+      obstacles.push({
+        id: `comm-${chunkIndex}`,
+        kind: 'comm-tower',
+        x: cx1 - hw1 * 0.22,
+        y: getValleyFloorHeight(cx1 - hw1 * 0.22, z1) - 1,
+        z: z1,
+        radius: 4.8,
+        height: 60,
+        thickness: 4.8,
+        yaw: 0.24,
+        tint: 0.55,
+        side: -1,
+      });
+
+      const z2 = zAt(0.8);
+      const cx2 = getCanyonCenterX(z2);
+      const hw2 = getCanyonHalfWidth(z2);
+      obstacles.push({
+        id: `devil-${chunkIndex}`,
+        kind: 'dust-devil',
+        x: cx2,
+        y: getValleyFloorHeight(cx2, z2) - 1,
+        z: z2,
+        radius: 7.6,
+        height: 68,
+        thickness: 7.6,
+        yaw: 0,
+        tint: 0.72,
+        driftAmp: Math.min(34, hw2 * 0.44),
+        driftSpeed: 0.62,
+        driftPhase: hash1D(seedBase + 10) * Math.PI * 2,
+      });
+    }
+    return obstacles;
+  }
+
+  // JAGGED VOLCANIC PEAKS: dramatic volcanic spires, split caldera pillars, low jagged basalt ridges, overhangs, swirling ash devils
+  if (pattern === 1) {
+    const z1 = zAt(0.36);
     const cx1 = getCanyonCenterX(z1);
     const hw1 = getCanyonHalfWidth(z1);
     obstacles.push({
-      id: `spire-1-a`,
-      kind: 'spire',
-      x: cx1 + hw1 * 0.62,
-      y: getValleyFloorHeight(cx1 + hw1 * 0.62, z1) - 3,
+      id: `ridge-${chunkIndex}`,
+      kind: 'low-ridge',
+      x: cx1,
+      y: getValleyFloorHeight(cx1, z1) - 2,
       z: z1,
-      radius: 10.5,
-      height: 66,
-      thickness: 10.5,
-      yaw: 0.4,
-      tint: 0.35,
+      radius: hw1 * 0.88,
+      height: 21,
+      thickness: 15,
+      yaw: 0.08,
+      tint: 0.2,
     });
 
-    const z2 = zStart - 275;
+    const z2 = zAt(0.8);
     const cx2 = getCanyonCenterX(z2);
     const hw2 = getCanyonHalfWidth(z2);
     obstacles.push({
-      id: `spire-1-b`,
-      kind: 'spire',
-      x: cx2 - hw2 * 0.62,
-      y: getValleyFloorHeight(cx2 - hw2 * 0.62, z2) - 3,
+      id: `overhang-${chunkIndex}`,
+      kind: 'overhang',
+      x: cx2,
+      y: getValleyFloorHeight(cx2, z2),
       z: z2,
-      radius: 11,
-      height: 70,
-      thickness: 11,
-      yaw: 1.7,
-      tint: 0.68,
+      radius: hw2 * 0.88,
+      height: 31,
+      thickness: 22,
+      yaw: -0.06,
+      tint: 0.15,
+      side: chunkIndex % 2 === 0 ? 1 : -1,
     });
-    return obstacles;
-  }
+  } else if (pattern === 2) {
+    const z1 = zAt(0.38);
+    const cx1 = getCanyonCenterX(z1);
+    obstacles.push({
+      id: `split-${chunkIndex}`,
+      kind: 'split-pillar',
+      x: cx1,
+      y: getValleyFloorHeight(cx1, z1) - 3,
+      z: z1,
+      radius: 14.5,
+      height: 92,
+      thickness: 17,
+      yaw: hash1D(seedBase + 2) * Math.PI,
+      tint: 0.18,
+    });
 
-  // Very gradual difficulty ramp across 40+ chunks (~13+ km)
-  const difficulty = Math.min(1, (chunkIndex - 1) / 40);
-  const seedBase = chunkIndex * 37.19;
-
-  // Every 2nd chunk features a wide, monumental natural rock arch to fly through
-  if (chunkIndex % 2 === 0) {
-    const archZ = zStart - (115 + hash1D(seedBase + 2) * 110);
-    const cx = getCanyonCenterX(archZ);
-    const hw = getCanyonHalfWidth(archZ);
-    const archSpan = Math.max(36, hw * (0.76 - difficulty * 0.1));
-    const archHeight = 40 + hash1D(seedBase + 3) * 14 - difficulty * 4;
-    const offset = (hash1D(seedBase + 4) - 0.5) * hw * 0.16;
+    const z2 = zAt(0.84);
+    const cx2 = getCanyonCenterX(z2);
+    const hw2 = getCanyonHalfWidth(z2);
+    obstacles.push({
+      id: `devil-${chunkIndex}`,
+      kind: 'dust-devil',
+      x: cx2,
+      y: getValleyFloorHeight(cx2, z2) - 1,
+      z: z2,
+      radius: 8.2,
+      height: 76,
+      thickness: 8.2,
+      yaw: 0,
+      tint: 0.35,
+      driftAmp: Math.min(30, hw2 * 0.44),
+      driftSpeed: 0.68,
+      driftPhase: hash1D(seedBase + 3) * Math.PI * 2,
+    });
+  } else {
+    const z1 = zAt(0.38);
+    const cx1 = getCanyonCenterX(z1);
+    const hw1 = getCanyonHalfWidth(z1);
     obstacles.push({
       id: `arch-${chunkIndex}`,
       kind: 'arch',
-      x: cx + offset,
-      y: getValleyFloorHeight(cx + offset, archZ) - 2,
-      z: archZ,
-      radius: archSpan,
-      height: archHeight,
-      thickness: 7.5 + hash1D(seedBase + 5) * 3.0,
-      yaw: (hash1D(seedBase + 6) - 0.5) * 0.24,
-      tint: hash1D(seedBase + 7),
+      x: cx1,
+      y: getValleyFloorHeight(cx1, z1) - 2,
+      z: z1,
+      radius: Math.max(38, hw1 * 0.78),
+      height: 40,
+      thickness: 8.8,
+      yaw: 0.12,
+      tint: 0.15,
     });
-  }
 
-  // Farther-apart jagged rock spires (1 to 2 per 340m chunk, always leaving wide open lanes!)
-  const spireCount = difficulty > 0.55 ? 2 : 1 + (chunkIndex % 2);
-  for (let i = 0; i < spireCount; i++) {
-    const s = seedBase + 10 + i * 13.7;
-    const frac = (i + 0.35 + hash1D(s) * 0.3) / spireCount;
-    const sz = zStart - frac * CHUNK_LENGTH;
-    const cx = getCanyonCenterX(sz);
-    const hw = getCanyonHalfWidth(sz);
-
-    // Keep plenty of breathing room around arches
-    const tooCloseToArch = obstacles.some(
-      (o) => o.kind === 'arch' && Math.abs(o.z - sz) < 75,
-    );
-    if (tooCloseToArch) continue;
-
-    // Place spires cleanly off-center or alternating sides so there's always a huge open flying corridor
-    const sidePick = (chunkIndex + i) % 3;
-    let lateralNorm = 0;
-    if (sidePick === 0) {
-      lateralNorm = -0.58 + hash1D(s + 1) * 0.28;
-    } else if (sidePick === 1) {
-      lateralNorm = 0.3 + hash1D(s + 1) * 0.28;
-    } else {
-      // Occasional scenic valley-center spire only after chunk 4, with 40m+ room on BOTH sides
-      lateralNorm = chunkIndex >= 4 ? (hash1D(s + 1) - 0.5) * 0.36 : 0.52;
-    }
-
-    const sx = cx + lateralNorm * hw;
-    const radius = 7.5 + hash1D(s + 2) * 5.2;
-    const height = 46 + hash1D(s + 3) * 44;
-
+    const z2 = zAt(0.82);
+    const cx2 = getCanyonCenterX(z2);
+    const hw2 = getCanyonHalfWidth(z2);
+    const side: -1 | 1 = chunkIndex % 2 === 0 ? 1 : -1;
     obstacles.push({
-      id: `spire-${chunkIndex}-${i}`,
+      id: `spire-${chunkIndex}`,
       kind: 'spire',
-      x: sx,
-      y: getValleyFloorHeight(sx, sz) - 3,
-      z: sz,
-      radius,
-      height,
-      thickness: radius,
-      yaw: hash1D(s + 4) * Math.PI * 2,
-      tint: hash1D(s + 5),
-    });
-  }
-
-  // Scenic outer canyon wall buttress tucked near the wall edge (every other chunk)
-  if (chunkIndex % 2 === 1) {
-    const buttressSide = (chunkIndex >> 1) % 2 === 0 ? -1 : 1;
-    const bz = zStart - (70 + hash1D(seedBase + 99) * 190);
-    const bcx = getCanyonCenterX(bz);
-    const bhw = getCanyonHalfWidth(bz);
-    const bx = bcx + buttressSide * (bhw * 0.88);
-    obstacles.push({
-      id: `buttress-${chunkIndex}`,
-      kind: 'buttress',
-      x: bx,
-      y: getValleyFloorHeight(bx, bz) - 4,
-      z: bz,
-      radius: 13 + hash1D(seedBase + 101) * 5,
-      height: 58 + hash1D(seedBase + 102) * 32,
-      thickness: 14,
-      yaw: hash1D(seedBase + 103) * Math.PI,
-      tint: hash1D(seedBase + 104),
+      x: cx2 + side * hw2 * 0.38,
+      y: getValleyFloorHeight(cx2 + side * hw2 * 0.38, z2) - 3,
+      z: z2,
+      radius: 11,
+      height: 82,
+      thickness: 11,
+      yaw: hash1D(seedBase + 6) * Math.PI * 2,
+      tint: 0.2,
     });
   }
 

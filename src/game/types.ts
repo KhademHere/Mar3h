@@ -1,6 +1,24 @@
 export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
 
-export type ObstacleKind = 'spire' | 'arch' | 'buttress';
+export type MartianZoneId = 'plains' | 'canyon' | 'colony' | 'volcanic';
+
+export interface MartianZoneInfo {
+  id: MartianZoneId;
+  name: string;
+  subtitle: string;
+}
+
+export type ObstacleKind =
+  | 'spire'
+  | 'arch'
+  | 'buttress'
+  | 'split-pillar'
+  | 'overhang'
+  | 'low-ridge'
+  | 'comm-tower'
+  | 'broken-bridge'
+  | 'solar-array'
+  | 'dust-devil';
 
 export interface CanyonObstacle {
   id: string;
@@ -8,16 +26,22 @@ export interface CanyonObstacle {
   x: number;
   y: number; // ground y at base
   z: number;
-  /** For spire / buttress: base radius; for arch: half-span between pillars */
+  /** Primary half-width / span / base radius depending on obstacle kind */
   radius: number;
-  /** For spire / buttress: height above base; for arch: clearance height under arch crown */
+  /** Primary height or clearance height above base */
   height: number;
-  /** For arch: thickness of pillars and crown */
+  /** Thickness / depth / slab height */
   thickness: number;
-  /** For arch: angle rotation around Y */
+  /** Y rotation or lean angle */
   yaw: number;
-  /** Subtle rock tint factor 0..1 */
+  /** Subtle rock/weathering tint factor 0..1 */
   tint: number;
+  /** Optional side (-1 left, +1 right) for cantilevered overhangs / towers */
+  side?: -1 | 1;
+  /** Optional sideways drift parameters for moving dust devils */
+  driftAmp?: number;
+  driftSpeed?: number;
+  driftPhase?: number;
 }
 
 export interface ControlInput {
@@ -43,6 +67,8 @@ export interface FlightTelemetry {
   /** 0..1 intensity of peripheral motion blur & wind streaks */
   speedIntensity: number;
   autoplayActive: boolean;
+  zoneId: MartianZoneId;
+  zoneName: string;
 }
 
 export interface RunSummary {
@@ -59,7 +85,7 @@ export interface RunSummary {
 
 export interface HudBannerEvent {
   id: number;
-  kind: 'near-miss' | 'shockwave' | 'scrape';
+  kind: 'near-miss' | 'shockwave' | 'scrape' | 'zone';
   label: string;
   sublabel: string;
 }

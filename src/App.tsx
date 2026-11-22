@@ -19,6 +19,8 @@ const INITIAL_TELEMETRY: FlightTelemetry = {
   isBoosting: false,
   speedIntensity: 0,
   autoplayActive: false,
+  zoneId: 'plains',
+  zoneName: 'Wide Open Red Plains',
 };
 
 export default function App() {
@@ -65,9 +67,12 @@ export default function App() {
         onBanner: (ev) => {
           setBanner(ev);
           if (bannerTimerRef.current !== null) window.clearTimeout(bannerTimerRef.current);
-          bannerTimerRef.current = window.setTimeout(() => {
-            setBanner(null);
-          }, 1250);
+          bannerTimerRef.current = window.setTimeout(
+            () => {
+              setBanner(null);
+            },
+            ev.kind === 'zone' ? 2200 : 1250,
+          );
         },
         onNearMissFlash: () => {
           setNearMissFlash(true);

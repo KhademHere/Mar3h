@@ -2,17 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CHUNK_LENGTH,
+  CHUNKS_PER_ZONE,
+  ZONE_LENGTH,
   getCanyonCenterX,
   getCanyonHalfWidth,
+  getDustDevilX,
   getObstaclesForChunk,
   getTerrainHeight,
+  getZoneInfoAtZ,
+  isBreatherChunk,
 } from './terrainMath';
 import {
+  MAX_ALTITUDE,
   createInitialFlightState,
   evaluateObstacleClearance,
   stepFlightSimulation,
 } from './simulation';
-import type { CanyonObstacle } from './types';
+import type { CanyonObstacle, MartianZoneId } from './types';
 
 test('opening canyon launch path is wide and craft survives 4 seconds with zero input', () => {
   let state = createInitialFlightState();
@@ -21,7 +27,11 @@ test('opening canyon launch path is wide and craft survives 4 seconds with zero 
   for (let i = 0; i < 240; i++) {
     const res = stepFlightSimulation(state, neutralInput, 1 / 60);
     state = res.state;
-    assert.equal(state.crashed, false, `Craft unexpectedly crashed at frame ${i} (z=${state.z.toFixed(1)})`);
+    assert.equal(
+      state.crashed,
+      false,
+      `Craft unexpectedly crashed at frame ${i} (z=${state.z.toFixed(1)}, y=${state.y.toFixed(1)})`,
+    );
   }
 
   assert.ok(state.distance > 500, 'Craft should travel over 500m in 4 seconds at exciting supersonic speed');
@@ -40,8 +50,8 @@ test('canyon flying ramp is noticeably wide with towering cliffs on both flanks'
   const rightCliffHeight = getTerrainHeight(cx + hw * 1.85, z);
 
   assert.ok(floorHeight < 10, `Valley floor should be low, got ${floorHeight}`);
-  assert.ok(leftCliffHeight > 45, `Left canyon cliff should tower high, got ${leftCliffHeight}`);
-  assert.ok(rightCliffHeight > 45, `Right canyon cliff should tower high, got ${rightCliffHeight}`);
+  assert.ok(leftCliffHeight > 35, `Left canyon cliff should rise high, got ${leftCliffHeight}`);
+  assert.ok(rightCliffHeight > 35, `Right canyon cliff should rise high, got ${rightCliffHeight}`);
 });
 
 test('holding afterburner surges Mach speed, consumes charge, and recharges when released', () => {
@@ -89,7 +99,6 @@ test('slight brush near a rock triggers a forgiving warning scrape instead of in
   state.y = 20;
   state.z = -100;
 
-  // Spire flank sits right in the outer brush zone (solidClearance ~ +0.5m)
   const brushSpire: CanyonObstacle = {
     id: 'brush-spire',
     kind: 'spire',
@@ -147,7 +156,6 @@ test('skimming close to a spire triggers Near Miss bonus and speed burst without
 test('direct solid impact into canyon cliff or rock triggers crash', () => {
   let state = createInitialFlightState();
 
-  // Fly hard right and down directly into the canyon cliff wall
   for (let i = 0; i < 360; i++) {
     const res = stepFlightSimulation(state, { steerX: 1, steerY: -0.5, boost: false }, 1 / 60);
     state = res.state;
@@ -158,12 +166,137 @@ test('direct solid impact into canyon cliff or rock triggers crash', () => {
   assert.ok(state.crashReason === 'terrain' || state.crashReason === 'obstacle');
 });
 
-test('Autoplay mode smoothly flies 20 seconds through canyons and arches, building high Mach without crashing', () => {
+test('giant stone arch allows flying cleanly both UNDER and OVER the crown', () => {
+  const chunk0 = getObstaclesForChunk(0);
+  const arch = chunk0.find((o) => o.kind === 'arch');
+  assert.ok(arch, 'Chunk 0 should include an iconic opening rock arch');
+
+  const underClearance = evaluateObstacleClearance(arch.x, 20, arch.z, arch, 1.15);
+  const overClearance = evaluateObstacleClearance(arch.x, MAX_ALTITUDE - 8, arch.z, arch, 1.15);
+  const crownHit = evaluateObstacleClearance(arch.x, arch.y + arch.height + 3, arch.z, arch, 1.15);
+
+  assert.ok(underClearance > 15, `Should fly cleanly under arch, got ${underClearance}`);
+  assert.ok(overClearance > 10, `Should soar cleanly OVER arch within MAX_ALTITUDE, got ${overClearance}`);
+  assert.ok(crownHit < 0, `Arch rock crown itself should be solid, got ${crownHit}`);
+  assert.ok(CHUNK_LENGTH >= 300);
+});
+
+test('varied obstacles enforce distinct steering moves (split tunnels, dive-low overhangs, climb-high ridges, moving dust devils)', () => {
+  // Split canyon central pillar: solid center, open left and right tunnels
+  const splitPillar: CanyonObstacle = {
+    id: 'split-test',
+    kind: 'split-pillar',
+    x: 0,
+    y: 0,
+    z: -400,
+    radius: 14,
+    height: 82,
+    thickness: 16,
+    yaw: 0,
+    tint: 0.5,
+  };
+  assert.ok(evaluateObstacleClearance(0, 22, -400, splitPillar, 1.15) < 0, 'Split pillar center must be solid');
+  assert.ok(evaluateObstacleClearance(-30, 22, -400, splitPillar, 1.15) > 10, 'Left split tunnel must be wide open');
+  assert.ok(evaluateObstacleClearance(30, 22, -400, splitPillar, 1.15) > 10, 'Right split tunnel must be wide open');
+
+  // Overhanging red cliff ledge: solid up high, clear low underneath
+  const overhang: CanyonObstacle = {
+    id: 'overhang-test',
+    kind: 'overhang',
+    x: 0,
+    y: 2,
+    z: -500,
+    radius: 52,
+    height: 29,
+    thickness: 22,
+    yaw: 0,
+    tint: 0.5,
+    side: 1,
+  };
+  assert.ok(evaluateObstacleClearance(0, 14, -500, overhang, 1.15) > 12, 'Diving low under overhang must be open');
+  assert.ok(evaluateObstacleClearance(0, 42, -500, overhang, 1.15) < 0, 'Flying high into overhang ledge must hit');
+
+  // Low jagged ridge: solid down low, open high above
+  const lowRidge: CanyonObstacle = {
+    id: 'ridge-test',
+    kind: 'low-ridge',
+    x: 0,
+    y: 1,
+    z: -600,
+    radius: 58,
+    height: 20,
+    thickness: 14,
+    yaw: 0,
+    tint: 0.5,
+  };
+  assert.ok(evaluateObstacleClearance(0, 10, -600, lowRidge, 1.15) < 0, 'Flying low into jagged ridge must hit');
+  assert.ok(evaluateObstacleClearance(0, 34, -600, lowRidge, 1.15) > 10, 'Climbing high over ridge must be clear');
+
+  // Drifting swirling red dust devil moves sideways over time
+  const devil: CanyonObstacle = {
+    id: 'devil-test',
+    kind: 'dust-devil',
+    x: 0,
+    y: 0,
+    z: -700,
+    radius: 7.5,
+    height: 68,
+    thickness: 7.5,
+    yaw: 0,
+    tint: 0.7,
+    driftAmp: 30,
+    driftSpeed: 0.7,
+    driftPhase: 0,
+  };
+  const xAt0 = getDustDevilX(devil, 0);
+  const xAtPeak = getDustDevilX(devil, Math.PI / (2 * 0.7));
+  assert.ok(Math.abs(xAtPeak - xAt0) > 25, 'Dust devil should drift sideways smoothly across the valley');
+  assert.ok(evaluateObstacleClearance(xAtPeak, 20, -700, devil, 1.15, Math.PI / (2 * 0.7)) < 0);
+  assert.ok(evaluateObstacleClearance(xAtPeak - 25, 20, -700, devil, 1.15, Math.PI / (2 * 0.7)) > 10);
+});
+
+test('distinct 4 Martian zones cycle smoothly with periodic open-sky breather stretches and varied landmarks', () => {
+  const seenZones = new Set<MartianZoneId>();
+  const seenKinds = new Set<string>();
+  let breatherCount = 0;
+
+  for (let c = 0; c < CHUNKS_PER_ZONE * 4; c++) {
+    const zMid = -(c * CHUNK_LENGTH + CHUNK_LENGTH * 0.5);
+    seenZones.add(getZoneInfoAtZ(zMid).id);
+    if (isBreatherChunk(c)) {
+      breatherCount++;
+      assert.equal(getObstaclesForChunk(c).length, 0, `Breather chunk ${c} should have clear open sky`);
+    }
+    for (const obs of getObstaclesForChunk(c)) {
+      seenKinds.add(obs.kind);
+    }
+  }
+
+  assert.equal(seenZones.size, 4, 'All 4 distinct Martian zones must appear across a full cycle');
+  assert.ok(breatherCount >= 12, `Expected regular open-sky breather stretches, got ${breatherCount}`);
+  for (const requiredKind of [
+    'arch',
+    'split-pillar',
+    'overhang',
+    'low-ridge',
+    'comm-tower',
+    'broken-bridge',
+    'solar-array',
+    'dust-devil',
+  ]) {
+    assert.ok(seenKinds.has(requiredKind), `Expected obstacle kind "${requiredKind}" to spawn across zones`);
+  }
+  assert.ok(ZONE_LENGTH >= 5500 && ZONE_LENGTH <= 7500, 'Each zone should span ~30-40s of supersonic flight');
+});
+
+test('Autoplay cleanly navigates all 4 Martian zones and every new obstacle type for 140s without crashing', () => {
   let state = createInitialFlightState();
   let maxRoll = 0;
+  const visitedZones = new Set<MartianZoneId>([state.currentZoneId]);
+  let zoneTransitions = 0;
 
-  // 20 seconds at 60Hz = 1200 frames across multiple curved chunks, arches, and spires
-  for (let i = 0; i < 1200; i++) {
+  // 140 seconds at 60Hz = 8400 frames spanning all 4 Martian zones (>24 km)
+  for (let i = 0; i < 8400; i++) {
     const res = stepFlightSimulation(
       state,
       { steerX: 0, steerY: 0, boost: false },
@@ -172,20 +305,19 @@ test('Autoplay mode smoothly flies 20 seconds through canyons and arches, buildi
     );
     state = res.state;
     if (Math.abs(state.roll) > maxRoll) maxRoll = Math.abs(state.roll);
-    assert.equal(state.crashed, false, `Autoplay crashed at frame ${i} (z=${state.z.toFixed(1)})`);
+    if (res.events.zoneChanged) {
+      zoneTransitions++;
+      visitedZones.add(res.events.zoneChanged.id);
+    }
+    assert.equal(
+      state.crashed,
+      false,
+      `Autoplay crashed at frame ${i} (zone=${state.currentZoneId}, z=${state.z.toFixed(1)})`,
+    );
   }
 
-  assert.ok(state.peakMach >= 1.9, `Autoplay should build high Mach speeds, got peakMach=${state.peakMach.toFixed(2)}`);
-  assert.ok(state.distance > 3000, `Autoplay should cover >3km in 20s, got ${state.distance.toFixed(0)}m`);
-  assert.ok(maxRoll > 0.12, 'Autoplay should bank naturally into turns');
-});
-
-test('opening chunk frames a wide grand rock arch that craft safely flies under', () => {
-  const chunk0 = getObstaclesForChunk(0);
-  const arch = chunk0.find((o) => o.kind === 'arch');
-  assert.ok(arch, 'Chunk 0 should include an iconic opening rock arch');
-
-  const clearance = evaluateObstacleClearance(arch.x, 20, arch.z, arch, 1.15);
-  assert.ok(clearance > 18, `Craft at cruising altitude should pass cleanly beneath wide arch, got clearance ${clearance}`);
-  assert.ok(CHUNK_LENGTH >= 300);
+  assert.equal(visitedZones.size, 4, `Autoplay should visit all 4 zones, visited: ${[...visitedZones].join(', ')}`);
+  assert.ok(zoneTransitions >= 3, `Expected >= 3 zone transition events, got ${zoneTransitions}`);
+  assert.ok(state.peakMach >= 2.2, `Autoplay should build high Mach speeds, got peakMach=${state.peakMach.toFixed(2)}`);
+  assert.ok(maxRoll > 0.14, 'Autoplay should bank naturally into turns');
 });

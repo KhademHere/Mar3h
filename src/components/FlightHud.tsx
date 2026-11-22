@@ -79,6 +79,12 @@ export const FlightHud: React.FC<FlightHudProps> = ({
               </>
             )}
           </div>
+          <div
+            data-testid="hud-zone"
+            className="mt-1 font-display text-[11px] font-semibold tracking-[0.14em] text-[#ffd4b4]/90 uppercase"
+          >
+            {telemetry.zoneName}
+          </div>
         </div>
 
         {/* Top-right controls: One-Click Autoplay toggle + Mute + Pause */}
@@ -185,7 +191,9 @@ export const FlightHud: React.FC<FlightHudProps> = ({
                   ? 'near-miss-glow text-[#fde047]'
                   : banner.kind === 'scrape'
                     ? 'near-miss-glow text-[#fb923c]'
-                    : 'shockwave-glow text-[#bae6fd]'
+                    : banner.kind === 'zone'
+                      ? 'near-miss-glow text-[#fff3e2]'
+                      : 'shockwave-glow text-[#bae6fd]'
               }`}
             >
               {banner.label}

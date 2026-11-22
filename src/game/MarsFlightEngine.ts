@@ -12,6 +12,7 @@ import {
   type FlightState,
 } from './simulation';
 import { createSpacecraftRig, type SpacecraftRig } from './spacecraft';
+import { getZoneInfoAtZ } from './terrainMath';
 import type { ControlInput, FlightTelemetry, GamePhase, HudBannerEvent, RunSummary } from './types';
 
 const STORAGE_BEST_SCORE = 'ares_mach_best_score_v1';
@@ -113,6 +114,7 @@ export class MarsFlightEngine {
   private readonly _projX = new Float32Array(FX_TRAIL_CAPACITY);
   private readonly _projY = new Float32Array(FX_TRAIL_CAPACITY);
   private readonly _projValid = new Uint8Array(FX_TRAIL_CAPACITY);
+  private readonly _zoneFogColor = new THREE.Color(HORIZON_FOG_COLOR);
 
   // Speed-line particles for the 2D rushing wind streak & subtle motion-blur canvas
   private readonly windStreaks: WindStreak[] = [];
@@ -244,7 +246,8 @@ export class MarsFlightEngine {
     this.syncCraftTransform(0.016);
     this.spacecraft.resetTrails(this._craftPos);
     this.resetFxTrails();
-    this.world.update(0.016, this.flight.x, this.flight.y, this.flight.z);
+    this.world.update(0.016, this.flight.x, this.flight.y, this.flight.z, this.flight.survivalSeconds);
+    this.updateZoneAtmosphere();
     this.updateSunShadowRig();
 
     if (initialAutostart) {
@@ -640,6 +643,16 @@ export class MarsFlightEngine {
     }
   }
 
+  private updateZoneAtmosphere(): void {
+    this.world.getZoneFogColor(this.flight.z, this._zoneFogColor);
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.copy(this._zoneFogColor);
+    }
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.copy(this._zoneFogColor);
+    }
+  }
+
   private updateSunShadowRig(): void {
     const targetX = this.flight.x;
     const targetZ = this.flight.z - 55;
@@ -940,6 +953,7 @@ export class MarsFlightEngine {
       0,
       Math.min(1, (mach - 1.05) / 2.2 + (this.flight.isBoosting ? 0.3 : 0)),
     );
+    const zone = getZoneInfoAtZ(this.flight.z);
     this.callbacks.onTelemetry({
       mach,
       speedMetersPerSec: computeSpeedFromMach(mach),
@@ -953,6 +967,8 @@ export class MarsFlightEngine {
       isBoosting: this.flight.isBoosting,
       speedIntensity: intensity,
       autoplayActive: this.autoplayActive,
+      zoneId: zone.id,
+      zoneName: zone.name,
     });
   }
 
@@ -1025,7 +1041,8 @@ export class MarsFlightEngine {
       );
       this.flight = step.state;
       this.syncCraftTransform(dt);
-      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z);
+      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z, this.flight.survivalSeconds);
+      this.updateZoneAtmosphere();
       this.updateSunShadowRig();
       this.updateCamera(dt);
       this.renderSpeedOverlay(dt);
@@ -1085,6 +1102,16 @@ export class MarsFlightEngine {
           });
         }
 
+        if (events.zoneChanged) {
+          this.callbacks.onBanner({
+            id: this.bannerSeq++,
+            kind: 'zone',
+            label: events.zoneChanged.name.toUpperCase(),
+            sublabel: events.zoneChanged.subtitle.toUpperCase(),
+          });
+          this.emitTelemetryNow();
+        }
+
         if (events.crashed) {
           this.hitstopTimer = 0.055;
           this.crashDelayTimer = 0.58;
@@ -1104,7 +1131,8 @@ export class MarsFlightEngine {
       }
 
       this.syncCraftTransform(dt);
-      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z);
+      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z, this.flight.survivalSeconds);
+      this.updateZoneAtmosphere();
       this.updateSunShadowRig();
       this.updateCamera(dt);
       this.renderSpeedOverlay(dt);
@@ -1119,7 +1147,7 @@ export class MarsFlightEngine {
         this.emitTelemetryNow();
       }
     } else if (this.phase === 'gameover') {
-      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z);
+      this.world.update(dt, this.flight.x, this.flight.y, this.flight.z, this.flight.survivalSeconds);
       this.updateCamera(dt);
     }
 
