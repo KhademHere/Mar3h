@@ -1,0 +1,6 @@
+{
+  "name": "Ares Mach",
+  "description": "High-speed supersonic spacecraft flight through towering Martian canyons, jagged red peaks, and giant rock arches.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

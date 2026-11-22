@@ -1,0 +1,172 @@
+import React from 'react';
+import type { RunSummary } from '../game/types';
+
+interface PauseModalProps {
+  onResume: () => void;
+  onRestart: () => void;
+  onTitle: () => void;
+}
+
+export const PauseModal: React.FC<PauseModalProps> = ({ onResume, onRestart, onTitle }) => {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="pause-title"
+      className="fixed inset-0 z-30 flex items-center justify-center bg-[#120502]/65 p-4"
+    >
+      <div className="w-full max-w-sm rounded-sm border border-[#ffd5b6]/28 bg-[#190905]/95 p-7 shadow-[0_24px_60px_rgba(10,3,1,0.8)]">
+        <p className="font-telemetry text-xs font-medium tracking-[0.2em] text-[#fb923c] uppercase">
+          Flight Hold
+        </p>
+        <h2
+          id="pause-title"
+          className="font-display mt-1 text-3xl font-bold tracking-[0.08em] text-[#fff6ee] uppercase"
+        >
+          Paused
+        </h2>
+
+        <div className="mt-6 flex flex-col gap-3">
+          <button
+            type="button"
+            onClick={onResume}
+            className="font-display w-full rounded-sm border border-[#ffd7b5]/45 bg-[#e85622] px-5 py-3 text-base font-bold tracking-[0.14em] text-[#fff8f3] uppercase transition-colors duration-150 hover:bg-[#f26430] focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer"
+          >
+            Resume Flight
+          </button>
+
+          <button
+            type="button"
+            onClick={onRestart}
+            className="font-display w-full rounded-sm border border-[#ffd8bc]/25 bg-[#291009] px-5 py-2.5 text-sm font-semibold tracking-[0.14em] text-[#ffe9d8] uppercase transition-colors duration-150 hover:border-[#ffd8bc]/50 hover:bg-[#38160d] focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer"
+          >
+            Restart Run
+          </button>
+
+          <button
+            type="button"
+            onClick={onTitle}
+            className="font-display w-full rounded-sm border border-transparent px-5 py-2 text-sm font-medium tracking-[0.12em] text-[#e5baa0] uppercase transition-colors duration-150 hover:text-[#fff4eb] focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer"
+          >
+            Title Screen
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface GameOverModalProps {
+  summary: RunSummary;
+  onRestart: () => void;
+  onTitle: () => void;
+}
+
+export const GameOverModal: React.FC<GameOverModalProps> = ({
+  summary,
+  onRestart,
+  onTitle,
+}) => {
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="gameover-title"
+      className="fixed inset-0 z-30 flex items-center justify-center bg-[#120502]/72 p-4"
+    >
+      <div className="w-full max-w-md rounded-sm border border-[#ffd5b6]/28 bg-[#190905]/96 p-7 shadow-[0_24px_64px_rgba(10,3,1,0.85)]">
+        <p className="font-telemetry text-xs font-medium tracking-[0.2em] text-[#f97316] uppercase">
+          Hull Impact · Flight Complete
+        </p>
+        <h2
+          id="gameover-title"
+          className="font-display mt-1 text-3xl sm:text-4xl font-bold tracking-[0.06em] text-[#fff6ee] uppercase"
+        >
+          Run Terminated
+        </h2>
+
+        {/* 3 crisp tabular-nums flight telemetry readouts */}
+        <div className="mt-6 grid grid-cols-3 gap-3 border-y border-[#ffd8bc]/14 py-5">
+          <div>
+            <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#7dd3fc] uppercase">
+              Peak Mach
+            </div>
+            <div
+              data-testid="summary-peak-mach"
+              className="font-telemetry mt-1 text-2xl sm:text-3xl font-bold text-[#f0fbff]"
+            >
+              {summary.peakMach.toFixed(1)}
+            </div>
+            <div className="font-telemetry mt-0.5 text-[11px] text-[#f5cbb0]/70">
+              {summary.isNewBestMach ? 'New Record' : `Best ${summary.bestMach.toFixed(1)}`}
+            </div>
+          </div>
+
+          <div>
+            <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#fb923c] uppercase">
+              Distance
+            </div>
+            <div className="font-telemetry mt-1 text-2xl sm:text-3xl font-bold text-[#fff6ee]">
+              {summary.distance >= 1000
+                ? `${(summary.distance / 1000).toFixed(1)}k`
+                : `${summary.distance}m`}
+            </div>
+            <div className="font-telemetry mt-0.5 text-[11px] text-[#f5cbb0]/70">
+              {summary.survivalSeconds}s flight
+            </div>
+          </div>
+
+          <div>
+            <div className="font-telemetry text-[11px] tracking-[0.14em] text-[#fcd34d] uppercase">
+              Near Miss
+            </div>
+            <div className="font-telemetry mt-1 text-2xl sm:text-3xl font-bold text-[#fff6ee]">
+              {summary.nearMissCount}
+            </div>
+            <div className="font-telemetry mt-0.5 text-[11px] text-[#f5cbb0]/70">
+              Canyon skims
+            </div>
+          </div>
+        </div>
+
+        {/* Final score row */}
+        <div className="mt-4 flex items-baseline justify-between">
+          <span className="font-display text-sm font-semibold tracking-[0.14em] text-[#f7c9aa] uppercase">
+            Final Score
+          </span>
+          <div className="text-right">
+            <span
+              data-testid="summary-score"
+              className="font-telemetry text-2xl font-bold text-[#fff7f0]"
+            >
+              {summary.score.toLocaleString()}
+            </span>
+            <span className="font-telemetry ml-2 text-xs text-[#f5cbb0]/75">
+              {summary.isNewBestScore ? 'New Best' : `Best ${summary.bestScore.toLocaleString()}`}
+            </span>
+          </div>
+        </div>
+
+        {/* Primary actions */}
+        <div className="mt-7 flex items-center gap-3">
+          <button
+            type="button"
+            data-start="true"
+            onClick={onRestart}
+            className="font-display flex-1 rounded-sm border border-[#ffd7b5]/45 bg-[#e85622] px-6 py-3 text-base font-bold tracking-[0.14em] text-[#fff8f3] uppercase transition-colors duration-150 hover:bg-[#f26430] focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer whitespace-nowrap"
+          >
+            Fly Again
+          </button>
+
+          <button
+            type="button"
+            onClick={onTitle}
+            className="font-display rounded-sm border border-[#ffd8bc]/24 bg-[#291009] px-5 py-3 text-sm font-semibold tracking-[0.12em] text-[#ffe9d8] uppercase transition-colors duration-150 hover:border-[#ffd8bc]/50 hover:bg-[#38160d] focus-visible:outline-2 focus-visible:outline-[#7dd3fc] cursor-pointer whitespace-nowrap"
+          >
+            Menu
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
