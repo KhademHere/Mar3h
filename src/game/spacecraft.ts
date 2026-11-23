@@ -14,6 +14,9 @@ export interface SpacecraftRig {
     roll: number,
     worldPos: THREE.Vector3,
     worldQuat: THREE.Quaternion,
+    barrelRollActive?: boolean,
+    barrelRollAngle?: number,
+    barrelRollDir?: -1 | 0 | 1,
   ) => void;
   triggerShockwave: (intensity?: number) => void;
   resetTrails: (worldPos: THREE.Vector3) => void;
@@ -24,6 +27,7 @@ export interface SpacecraftRig {
 
 /**
  * Helper that creates an in-place updated glowing wingtip ribbon trail (zero per-frame GC).
+ * Switches seamlessly into crisp spiraling pure-white corkscrew vapor ribbons during barrel rolls.
  */
 class WingtipTrail {
   public readonly mesh: THREE.Mesh;
@@ -32,9 +36,13 @@ class WingtipTrail {
   private readonly positions: Float32Array;
   private readonly colors: Float32Array;
   private readonly points: THREE.Vector3[];
+  private readonly axes: THREE.Vector3[];
+  private readonly rollingFlags: Uint8Array;
 
   constructor() {
     this.points = Array.from({ length: TRAIL_SEGMENTS }, () => new THREE.Vector3());
+    this.axes = Array.from({ length: TRAIL_SEGMENTS }, () => new THREE.Vector3(1, 0, 0));
+    this.rollingFlags = new Uint8Array(TRAIL_SEGMENTS);
     // 2 vertices per segment (ribbon width)
     this.positions = new Float32Array(TRAIL_SEGMENTS * 2 * 3);
     this.colors = new Float32Array(TRAIL_SEGMENTS * 2 * 3);
@@ -56,7 +64,7 @@ class WingtipTrail {
     this.material = new THREE.MeshBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.24,
+      opacity: 0.26,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       side: THREE.DoubleSide,
@@ -69,40 +77,75 @@ class WingtipTrail {
   public reset(anchor: THREE.Vector3): void {
     for (let i = 0; i < TRAIL_SEGMENTS; i++) {
       this.points[i].copy(anchor);
+      this.axes[i].set(1, 0, 0);
+      this.rollingFlags[i] = 0;
     }
+    this.material.opacity = 0.26;
     this.rebuildGeometry(0.18, 0.7);
   }
 
-  public pushPoint(anchor: THREE.Vector3, width: number, brightness: number): void {
+  public pushPoint(
+    anchor: THREE.Vector3,
+    ribbonAxis: THREE.Vector3,
+    width: number,
+    brightness: number,
+    isRolling: boolean,
+  ): void {
     // Shift trail points backward in-place (zero allocation)
     for (let i = TRAIL_SEGMENTS - 1; i > 0; i--) {
       this.points[i].copy(this.points[i - 1]);
+      this.axes[i].copy(this.axes[i - 1]);
+      this.rollingFlags[i] = this.rollingFlags[i - 1];
     }
     this.points[0].copy(anchor);
+    this.axes[0].copy(ribbonAxis);
+    this.rollingFlags[0] = isRolling ? 1 : 0;
+
+    let anyRolling = false;
+    for (let i = 0; i < TRAIL_SEGMENTS; i++) {
+      if (this.rollingFlags[i]) {
+        anyRolling = true;
+        break;
+      }
+    }
+    this.material.opacity = anyRolling ? 0.46 : 0.26;
     this.rebuildGeometry(width, brightness);
   }
 
   private rebuildGeometry(baseWidth: number, brightness: number): void {
     for (let i = 0; i < TRAIL_SEGMENTS; i++) {
       const t = i / (TRAIL_SEGMENTS - 1);
-      const fade = Math.pow(1 - t, 1.85);
-      const halfW = baseWidth * (0.28 + 0.72 * fade);
+      const isRollSeg = this.rollingFlags[i] === 1;
+      const fade = Math.pow(1 - t, isRollSeg ? 1.5 : 1.85);
+      const halfW = baseWidth * (isRollSeg ? 1.18 : 1.0) * (0.24 + 0.76 * fade);
       const p = this.points[i];
+      const ax = this.axes[i];
 
       const vIdx = i * 6;
-      // Ribbon aligned horizontally/slightly angled for crisp rear visibility
-      this.positions[vIdx] = p.x - halfW;
-      this.positions[vIdx + 1] = p.y;
-      this.positions[vIdx + 2] = p.z;
+      // Oriented along rotated wing plane so 360-degree corkscrew spirals stay bold from every angle
+      this.positions[vIdx] = p.x - ax.x * halfW;
+      this.positions[vIdx + 1] = p.y - ax.y * halfW;
+      this.positions[vIdx + 2] = p.z - ax.z * halfW;
 
-      this.positions[vIdx + 3] = p.x + halfW;
-      this.positions[vIdx + 4] = p.y;
-      this.positions[vIdx + 5] = p.z;
+      this.positions[vIdx + 3] = p.x + ax.x * halfW;
+      this.positions[vIdx + 4] = p.y + ax.y * halfW;
+      this.positions[vIdx + 5] = p.z + ax.z * halfW;
 
-      // Bright white-cyan core fading into electric sky-blue tail
-      const r = (0.45 + 0.55 * fade) * fade * brightness;
-      const g = (0.82 + 0.18 * fade) * fade * brightness;
-      const b = 1.0 * fade * brightness;
+      let r: number;
+      let g: number;
+      let b: number;
+      if (isRollSeg) {
+        // Crisp pure-white aerodynamic corkscrew vapor ribbon
+        const rollLum = fade * Math.max(1.0, brightness * 1.15);
+        r = rollLum;
+        g = rollLum;
+        b = rollLum;
+      } else {
+        // Bright white-cyan core fading into electric sky-blue tail
+        r = (0.45 + 0.55 * fade) * fade * brightness;
+        g = (0.82 + 0.18 * fade) * fade * brightness;
+        b = 1.0 * fade * brightness;
+      }
 
       this.colors[vIdx] = r;
       this.colors[vIdx + 1] = g;
@@ -540,6 +583,44 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   vaporConeMesh.position.z = 0.45;
   shockwaveGroup.add(vaporConeMesh);
 
+  // 10b. Shimmering Aerodynamic Deflection Glow Shell & Vortex Rings active during Snap Barrel Roll
+  const rollShieldGroup = new THREE.Group();
+  rollShieldGroup.visible = false;
+  hullRoot.add(rollShieldGroup);
+
+  const rollShellGeo = new THREE.SphereGeometry(1.0, 20, 14);
+  rollShellGeo.scale(3.75, 0.92, 4.25);
+  rollShellGeo.translate(0, 0.04, 0.25);
+  disposables.push(rollShellGeo);
+  const rollShellMat = new THREE.MeshBasicMaterial({
+    color: 0xe6faff,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  customMaterials.push(rollShellMat);
+  const rollShellMesh = new THREE.Mesh(rollShellGeo, rollShellMat);
+  rollShieldGroup.add(rollShellMesh);
+
+  const rollVortexGeo1 = new THREE.TorusGeometry(2.15, 0.065, 8, 36);
+  const rollVortexGeo2 = new THREE.TorusGeometry(3.55, 0.055, 8, 44);
+  disposables.push(rollVortexGeo1, rollVortexGeo2);
+  const rollVortexMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  customMaterials.push(rollVortexMat);
+  const rollVortexRing1 = new THREE.Mesh(rollVortexGeo1, rollVortexMat);
+  rollVortexRing1.position.set(0, 0.04, -0.55);
+  const rollVortexRing2 = new THREE.Mesh(rollVortexGeo2, rollVortexMat);
+  rollVortexRing2.position.set(0, 0.04, 1.55);
+  rollShieldGroup.add(rollVortexRing1, rollVortexRing2);
+
   // 11. World-space wingtip plasma ribbon trails + pooled Blue-and-Red Afterburner Spark Wisps
   const trailGroup = new THREE.Group();
   const leftTrail = new WingtipTrail();
@@ -609,6 +690,9 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   const _rightTipWorld = new THREE.Vector3();
   const _nozzleWorld = new THREE.Vector3();
   const _aftDirWorld = new THREE.Vector3();
+  const _wingAxisWorld = new THREE.Vector3();
+  const _rightAxisWorld = new THREE.Vector3();
+  const _upAxisWorld = new THREE.Vector3();
 
   const _cruiseCoreColor = new THREE.Color(0xe6f9ff);
   const _boostCoreColor = new THREE.Color(0x2cd4ff);
@@ -623,6 +707,8 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
   let shockwavePeakScale = 2.6;
   let flickerClock = 0;
   let boostVisual = 0; // 0 (normal cruising light-blue) -> 1 (full blazing electric-blue + crimson-red!)
+  let rollVisual = 0; // 0 -> 1 shimmering aerodynamic deflection aura during Snap Barrel Roll
+  let isCockpitMode = false;
   let ignitionFlash = 0; // crisp burst flash when afterburner engages
   let wasBoosting = false;
   let sparkSpawnAccum = 0;
@@ -644,6 +730,8 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       leftTrail.reset(_leftTipWorld);
       rightTrail.reset(_rightTipWorld);
       boostVisual = 0;
+      rollVisual = 0;
+      rollShieldGroup.visible = false;
       ignitionFlash = 0;
       wasBoosting = false;
       for (let i = 0; i < SPARK_COUNT; i++) {
@@ -660,11 +748,25 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       trailGroup.visible = visible;
     },
     setCockpitMode: (isCockpit: boolean) => {
-      // Hide opaque canopy dome & rear spine when camera sits inside the glass cockpit
+      isCockpitMode = isCockpit;
+      // Hide opaque canopy dome, rear spine, and roll-shield shell when camera sits inside the glass cockpit
       canopyMesh.visible = !isCockpit;
       spineMesh.visible = !isCockpit;
+      if (isCockpit) {
+        rollShieldGroup.visible = false;
+      }
     },
-    updateVisuals: (dt, mach, boosting, _roll, worldPos, worldQuat) => {
+    updateVisuals: (
+      dt,
+      mach,
+      boosting,
+      _roll,
+      worldPos,
+      worldQuat,
+      barrelRollActive = false,
+      barrelRollAngle = 0,
+      barrelRollDir = 0,
+    ) => {
       flickerClock += dt;
 
       // Crisp ignition flash on boost start + smooth thermal ramp & cooldown back to normal cruising blue
@@ -677,8 +779,27 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
       const rampRate = boosting ? 14.0 : 5.2;
       boostVisual += ((boosting ? 1 : 0) - boostVisual) * (1 - Math.exp(-rampRate * dt));
 
+      const rollRamp = barrelRollActive ? 22.0 : 10.5;
+      rollVisual += ((barrelRollActive ? 1 : 0) - rollVisual) * (1 - Math.exp(-rollRamp * dt));
+
+      // Shimmering aerodynamic deflection aura around craft during Snap Barrel Roll
+      if (rollVisual > 0.02 && !isCockpitMode) {
+        rollShieldGroup.visible = true;
+        const shimmer = 0.78 + Math.sin(flickerClock * 58) * 0.22;
+        rollShellMat.opacity = Math.min(0.32, rollVisual * 0.24 * shimmer);
+        rollVortexMat.opacity = Math.min(0.88, rollVisual * 0.78 * shimmer);
+        const pulseScale = 0.96 + Math.sin(flickerClock * 42) * 0.06;
+        rollShellMesh.scale.set(pulseScale, pulseScale, 1.0 + rollVisual * 0.06);
+        rollVortexRing1.rotation.z = barrelRollAngle * 2.4 + flickerClock * 12;
+        rollVortexRing2.rotation.z = -barrelRollAngle * 2.0 - flickerClock * 9;
+        rollVortexRing1.scale.setScalar(0.92 + rollVisual * 0.14);
+        rollVortexRing2.scale.setScalar(0.9 + rollVisual * 0.18);
+      } else {
+        rollShieldGroup.visible = false;
+      }
+
       const machFactor = Math.max(0.45, (mach - 0.85) * 0.75);
-      const boostLengthFactor = 1.0 + boostVisual * 1.18 + ignitionFlash * 0.35;
+      const boostLengthFactor = 1.0 + boostVisual * 1.18 + ignitionFlash * 0.35 + rollVisual * 0.18;
       const boostWidthFactor = 1.0 + boostVisual * 0.44 + ignitionFlash * 0.22;
       const flicker =
         0.91 + Math.sin(flickerClock * 64) * 0.09 + Math.cos(flickerClock * 103) * 0.06;
@@ -689,6 +810,9 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
 
       for (let i = 0; i < enginePlumes.length; i++) {
         enginePlumes[i].scale.set(plumeXY, plumeXY, plumeZ);
+        // Keep plumes anchored cleanly to both nozzles while twisting axially with the barrel roll spin
+        const swirlAmp = rollVisual * (0.14 + boostVisual * 0.16);
+        enginePlumes[i].rotation.set(0, 0, rollVisual > 0.01 ? barrelRollAngle * 2.6 : 0);
 
         // Fiery crimson-red outer plasma envelope & trailing tail stretch & shimmer fiercely during boost
         const shimmerX = 1 + Math.sin(flickerClock * 84 + i * 2.1) * 0.14 * boostVisual;
@@ -701,8 +825,13 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
           shimmerY * (1.06 + ignitionFlash * 0.25),
           0.62 + boostVisual * 0.85,
         );
+        redFlareCones[i].position.set(
+          Math.sin(barrelRollAngle * 2.4 + i * Math.PI) * swirlAmp * 0.16,
+          Math.cos(barrelRollAngle * 2.4 + i * Math.PI) * swirlAmp * 0.16,
+          0,
+        );
 
-        // Pulsing shock-diamond flame rings traveling & throbbing down the blue-and-red exhaust
+        // Pulsing shock-diamond flame rings traveling & spiraling tightly down the blue-and-red exhaust
         const diamonds = shockDiamondSets[i];
         const showDiamonds = boostVisual > 0.06;
         for (let d = 0; d < diamonds.length; d++) {
@@ -712,11 +841,13 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
             const wave = Math.sin(flickerClock * 42 - d * 1.45 + i * 0.8) * 0.5 + 0.5;
             const ringScale = (0.76 - d * 0.11) * (0.88 + wave * 0.34 + ignitionFlash * 0.25);
             dm.scale.set(ringScale, ringScale, 1.0 + wave * 0.4);
+            dm.position.x = Math.sin(barrelRollAngle * 2.8 - d * 1.15 + i * Math.PI) * swirlAmp * (0.14 + d * 0.09);
+            dm.position.y = Math.cos(barrelRollAngle * 2.8 - d * 1.15 + i * Math.PI) * swirlAmp * (0.14 + d * 0.09);
             dm.position.z = 0.72 + d * 0.92 + Math.sin(flickerClock * 36 - d) * 0.08;
           }
         }
 
-        const blueHaloScale = (1.0 + boostVisual * 0.85 + ignitionFlash * 0.75 + machFactor * 0.18) * flicker;
+        const blueHaloScale = (1.0 + boostVisual * 0.85 + ignitionFlash * 0.75 + machFactor * 0.18 + rollVisual * 0.25) * flicker;
         engineHaloSprites[i].scale.set(blueHaloScale, blueHaloScale, 1);
 
         const redHaloScale = (1.45 + boostVisual * 1.75 + ignitionFlash * 1.1) * redPulse;
@@ -738,14 +869,16 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
 
       // Flickering blue-and-red dynamic lighting across rear V-tail fins, wings & dusty Martian ground
       engineLightBlue.intensity =
-        (8 + machFactor * 3.5 + boostVisual * 18 + ignitionFlash * 16) * flicker;
+        (8 + machFactor * 3.5 + boostVisual * 18 + ignitionFlash * 16 + rollVisual * 7) * flicker;
       engineLightRed.intensity =
         (boostVisual * 34 + ignitionFlash * 22) * redPulse;
 
-      // Spawn & update trailing glowing blue-and-red afterburner sparks & heat streaks
+      // Spawn & update trailing glowing blue-and-red afterburner sparks & heat streaks (whipping tangentially during rolls!)
       if (boostVisual > 0.14) {
-        sparkSpawnAccum += dt * (48 + boostVisual * 52);
+        sparkSpawnAccum += dt * (48 + boostVisual * 52 + rollVisual * 36);
         _aftDirWorld.set(0, 0, 1).applyQuaternion(worldQuat);
+        _rightAxisWorld.set(1, 0, 0).applyQuaternion(worldQuat);
+        _upAxisWorld.set(0, 1, 0).applyQuaternion(worldQuat);
         while (sparkSpawnAccum >= 1) {
           sparkSpawnAccum -= 1;
           const sp = sparks[sparkCursor];
@@ -759,8 +892,12 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
           sp.y = _nozzleWorld.y + (Math.random() - 0.5) * 0.45;
           sp.z = _nozzleWorld.z + (Math.random() - 0.5) * 0.4;
           const ejectSpeed = 32 + Math.random() * 44;
-          sp.vx = _aftDirWorld.x * ejectSpeed + (Math.random() - 0.5) * 9;
-          sp.vy = _aftDirWorld.y * ejectSpeed + (Math.random() - 0.5) * 7;
+          const swirlSpeed = barrelRollActive ? 22 * (barrelRollDir || 1) : 0;
+          const swirlAngle = barrelRollAngle + sparkCursor * 0.85;
+          const tangX = (_rightAxisWorld.x * Math.cos(swirlAngle) + _upAxisWorld.x * Math.sin(swirlAngle)) * swirlSpeed;
+          const tangY = (_rightAxisWorld.y * Math.cos(swirlAngle) + _upAxisWorld.y * Math.sin(swirlAngle)) * swirlSpeed;
+          sp.vx = _aftDirWorld.x * ejectSpeed + tangX + (Math.random() - 0.5) * 9;
+          sp.vy = _aftDirWorld.y * ejectSpeed + tangY + (Math.random() - 0.5) * 7;
           sp.vz = _aftDirWorld.z * ejectSpeed + 18;
           sp.maxLife = 0.18 + Math.random() * 0.22;
           sp.life = sp.maxLife;
@@ -825,14 +962,23 @@ export function createSpacecraftRig(materials: MarsMaterialLibrary): SpacecraftR
         }
       }
 
-      // Compute wingtip world positions and push to sleek glowing ribbon trails
+      // Compute wingtip world positions and push to sleek glowing ribbon trails (pure white corkscrew during roll!)
       _leftTipWorld.copy(_leftTipLocal).applyQuaternion(worldQuat).add(worldPos);
       _rightTipWorld.copy(_rightTipLocal).applyQuaternion(worldQuat).add(worldPos);
+      _wingAxisWorld.set(0.75, 0.66, 0).applyQuaternion(worldQuat).normalize();
 
-      const trailWidth = boosting ? 0.16 : 0.09 + Math.min(0.05, (mach - 1) * 0.02);
-      const trailBrightness = boosting ? 0.98 : 0.62 + Math.min(0.25, (mach - 1) * 0.1);
-      leftTrail.pushPoint(_leftTipWorld, trailWidth, trailBrightness);
-      rightTrail.pushPoint(_rightTipWorld, trailWidth, trailBrightness);
+      const trailWidth = barrelRollActive
+        ? 0.14
+        : boosting
+          ? 0.16
+          : 0.09 + Math.min(0.05, (mach - 1) * 0.02);
+      const trailBrightness = barrelRollActive
+        ? 1.05
+        : boosting
+          ? 0.98
+          : 0.62 + Math.min(0.25, (mach - 1) * 0.1);
+      leftTrail.pushPoint(_leftTipWorld, _wingAxisWorld, trailWidth, trailBrightness, barrelRollActive);
+      rightTrail.pushPoint(_rightTipWorld, _wingAxisWorld, trailWidth, trailBrightness, barrelRollActive);
     },
     dispose: () => {
       for (const g of disposables) g.dispose();

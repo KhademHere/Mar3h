@@ -317,6 +317,71 @@ export class FlightAudioEngine {
     osc.stop(now + 0.06);
   }
 
+  /** Sharp, rushing supersonic air-slice whoosh layered cleanly over the jet engine roar on Snap Barrel Roll */
+  public playBarrelRoll(): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;
+    const now = this.ctx.currentTime;
+
+    // 1. Crisp whipping air-slice bandpass noise sweep (low -> high whip -> rushing falloff)
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.value = 2.1;
+    bp.frequency.setValueAtTime(420, now);
+    bp.frequency.exponentialRampToValueAtTime(2450, now + 0.13);
+    bp.frequency.exponentialRampToValueAtTime(340, now + 0.42);
+
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.001, now);
+    nGain.gain.linearRampToValueAtTime(0.62, now + 0.045);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.44);
+
+    src.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(this.masterGain);
+    src.start(now);
+    src.stop(now + 0.46);
+
+    // 2. Subtle aerodynamic vortex whistle accenting the 360-degree wing whip
+    const whistle = this.ctx.createOscillator();
+    whistle.type = 'sine';
+    whistle.frequency.setValueAtTime(310, now);
+    whistle.frequency.exponentialRampToValueAtTime(780, now + 0.14);
+    whistle.frequency.exponentialRampToValueAtTime(390, now + 0.34);
+
+    const wGain = this.ctx.createGain();
+    wGain.gain.setValueAtTime(0.001, now);
+    wGain.gain.linearRampToValueAtTime(0.14, now + 0.04);
+    wGain.gain.exponentialRampToValueAtTime(0.001, now + 0.36);
+
+    whistle.connect(wGain);
+    wGain.connect(this.masterGain);
+    whistle.start(now);
+    whistle.stop(now + 0.38);
+  }
+
+  /** Bright aerodynamic shimmer deflection spark sound when a mid-roll graze bounces cleanly */
+  public playRollDeflect(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(980, now);
+    osc.frequency.exponentialRampToValueAtTime(1640, now + 0.11);
+
+    const g = this.ctx.createGain();
+    g.gain.setValueAtTime(0.001, now);
+    g.gain.linearRampToValueAtTime(0.22, now + 0.015);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+
+    osc.connect(g);
+    g.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  }
+
   /** Forgiving rock/ramp graze warning spark crunch */
   public playScrape(): void {
     if (!this.ctx || !this.masterGain || !this.noiseBuffer || this.muted) return;

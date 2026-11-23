@@ -5,6 +5,8 @@ import { DIFFICULTY_CONFIGS, DIFFICULTY_ORDER, getDifficultyConfig } from './dif
 import { createMarsMaterialLibrary, type MarsMaterialLibrary } from './materials';
 import { createMarsWorldRig, HORIZON_FOG_COLOR, SUN_DIRECTION, type MarsWorldRig } from './marsWorld';
 import {
+  BARREL_ROLL_COOLDOWN_SEC,
+  BARREL_ROLL_DURATION_SEC,
   computeSpeedFromMach,
   createInitialFlightState,
   damp,
@@ -60,6 +62,7 @@ interface FxTrailSample {
   right: THREE.Vector3;
   center: THREE.Vector3;
   valid: boolean;
+  isRolling: boolean;
 }
 
 export interface MarsFlightCallbacks {
@@ -129,16 +132,27 @@ export class MarsFlightEngine {
   private touchOriginX = 0;
   private touchOriginY = 0;
   private uiBoostHeld = false;
+  private pendingBarrelRoll: -1 | 0 | 1 = 0;
+  private lastLeftKeyTapMs = 0;
+  private lastRightKeyTapMs = 0;
+  private lastCanvasTapMs = 0;
+  private lastCanvasTapSide: -1 | 0 | 1 = 0;
 
   // Pre-allocated math helpers for zero-GC render loop & 3D->2D fxCanvas trail projection
+  // _flightQuat stores steering bank ONLY (keeps Chase/Wing/Cockpit horizons rock-steady);
+  // _craftQuat adds barrelRollAngle so the spacecraft mesh & wingtip trails whip 360 degrees!
   private readonly _craftPos = new THREE.Vector3();
+  private readonly _flightEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+  private readonly _flightQuat = new THREE.Quaternion();
   private readonly _craftEuler = new THREE.Euler(0, 0, 0, 'YXZ');
   private readonly _craftQuat = new THREE.Quaternion();
+  private readonly _cockpitRollEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+  private readonly _cockpitRollQuat = new THREE.Quaternion();
   private readonly _camTargetPos = new THREE.Vector3();
   private readonly _camLookAt = new THREE.Vector3();
   private readonly _camUpScratch = new THREE.Vector3(0, 1, 0);
   private readonly _curCamLook = new THREE.Vector3(0, 20, -40);
-  private readonly _controlInput: ControlInput = { steerX: 0, steerY: 0, boost: false };
+  private readonly _controlInput: ControlInput = { steerX: 0, steerY: 0, boost: false, barrelRoll: 0 };
 
   private readonly _leftEmitterLocal = new THREE.Vector3(-3.55, 0.02, 2.15);
   private readonly _rightEmitterLocal = new THREE.Vector3(3.55, 0.02, 2.15);
@@ -150,6 +164,7 @@ export class MarsFlightEngine {
   private readonly _projX = new Float32Array(FX_TRAIL_CAPACITY);
   private readonly _projY = new Float32Array(FX_TRAIL_CAPACITY);
   private readonly _projValid = new Uint8Array(FX_TRAIL_CAPACITY);
+  private readonly _projRolling = new Uint8Array(FX_TRAIL_CAPACITY);
   private readonly _zoneFogColor = new THREE.Color(HORIZON_FOG_COLOR);
 
   // Speed-line particles for the 2D rushing wind streak & subtle motion-blur canvas
@@ -178,6 +193,7 @@ export class MarsFlightEngine {
         right: new THREE.Vector3(),
         center: new THREE.Vector3(),
         valid: false,
+        isRolling: false,
       });
     }
 
@@ -416,6 +432,7 @@ export class MarsFlightEngine {
     this.trailCount = 0;
     for (let i = 0; i < FX_TRAIL_CAPACITY; i++) {
       this._trailRing[i].valid = false;
+      this._trailRing[i].isRolling = false;
     }
   }
 
@@ -425,6 +442,7 @@ export class MarsFlightEngine {
     slot.right.copy(this._rightEmitterLocal).applyQuaternion(this._craftQuat).add(this._craftPos);
     slot.center.copy(this._centerEmitterLocal).applyQuaternion(this._craftQuat).add(this._craftPos);
     slot.valid = true;
+    slot.isRolling = this.flight.barrelRollTimer > 0;
 
     this.trailHead = (this.trailHead + 1) % FX_TRAIL_CAPACITY;
     if (this.trailCount < FX_TRAIL_CAPACITY) {
@@ -491,17 +509,17 @@ export class MarsFlightEngine {
 
   private applyCameraSnapForCurrentView(): void {
     if (this.cameraView === 'cockpit') {
-      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._craftQuat).add(this._craftPos);
-      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._flightQuat).add(this._craftPos);
+      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._flightQuat).add(this._craftPos);
       this.camera.position.copy(this._camTargetPos);
       this._curCamLook.copy(this._camLookAt);
-      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._craftQuat);
+      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._flightQuat);
       this.camera.up.copy(this._camUpScratch);
       this.camera.lookAt(this._curCamLook);
     } else if (this.cameraView === 'wing') {
       this.camera.up.set(0, 1, 0);
-      this._camTargetPos.set(4.85, 0.76, 4.45).applyQuaternion(this._craftQuat).add(this._craftPos);
-      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camTargetPos.set(4.85, 0.76, 4.45).applyQuaternion(this._flightQuat).add(this._craftPos);
+      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._flightQuat).add(this._craftPos);
       this.camera.position.copy(this._camTargetPos);
       this._curCamLook.copy(this._camLookAt);
       this.camera.lookAt(this._curCamLook);
@@ -526,6 +544,10 @@ export class MarsFlightEngine {
     this.audio.unlock();
     this.keysHeld.clear();
     this.uiBoostHeld = false;
+    this.pendingBarrelRoll = 0;
+    this.lastLeftKeyTapMs = 0;
+    this.lastRightKeyTapMs = 0;
+    this.lastCanvasTapMs = 0;
     this.touchActive = false;
     this.pointerSteerX = 0;
     this.pointerSteerY = 0;
@@ -606,6 +628,12 @@ export class MarsFlightEngine {
     this.uiBoostHeld = held;
   }
 
+  public triggerBarrelRoll(dir: -1 | 1): void {
+    if (this.phase !== 'playing' || this.flight.crashed) return;
+    this.audio.unlock();
+    this.pendingBarrelRoll = dir;
+  }
+
   public toggleMute(): boolean {
     this.audio.unlock();
     const muted = this.audio.toggleMute();
@@ -661,6 +689,34 @@ export class MarsFlightEngine {
     if (code === 'KeyC' && !e.repeat && this.phase === 'playing') {
       this.cycleCameraView();
       return;
+    }
+
+    if (this.phase === 'playing' && !e.repeat) {
+      if (code === 'KeyQ') {
+        this.triggerBarrelRoll(-1);
+        return;
+      }
+      if (code === 'KeyE') {
+        this.triggerBarrelRoll(1);
+        return;
+      }
+      // Double-tap Left (ArrowLeft / A) or Right (ArrowRight / D) triggers Snap Barrel Roll
+      const nowMs = performance.now();
+      if (code === 'ArrowLeft' || code === 'KeyA') {
+        if (nowMs - this.lastLeftKeyTapMs <= 280) {
+          this.triggerBarrelRoll(-1);
+          this.lastLeftKeyTapMs = 0;
+        } else {
+          this.lastLeftKeyTapMs = nowMs;
+        }
+      } else if (code === 'ArrowRight' || code === 'KeyD') {
+        if (nowMs - this.lastRightKeyTapMs <= 280) {
+          this.triggerBarrelRoll(1);
+          this.lastRightKeyTapMs = 0;
+        } else {
+          this.lastRightKeyTapMs = nowMs;
+        }
+      }
     }
 
     if (
@@ -731,9 +787,29 @@ export class MarsFlightEngine {
     this.pointerSteerY = 0;
   };
 
+  private readonly onPointerDown = (e: PointerEvent): void => {
+    if (this.phase !== 'playing' || this.flight.crashed) return;
+    const target = e.target as HTMLElement | null;
+    if (target && target.closest('button')) return;
+    const rect = this.mountEl.getBoundingClientRect();
+    if (rect.width <= 0) return;
+
+    const side: -1 | 1 = e.clientX < rect.left + rect.width * 0.5 ? -1 : 1;
+    const nowMs = performance.now();
+    if (side === this.lastCanvasTapSide && nowMs - this.lastCanvasTapMs <= 300) {
+      this.triggerBarrelRoll(side);
+      this.lastCanvasTapMs = 0;
+      this.lastCanvasTapSide = 0;
+    } else {
+      this.lastCanvasTapMs = nowMs;
+      this.lastCanvasTapSide = side;
+    }
+  };
+
   private readonly onWindowBlur = (): void => {
     this.keysHeld.clear();
     this.uiBoostHeld = false;
+    this.pendingBarrelRoll = 0;
     this.touchActive = false;
   };
 
@@ -741,6 +817,7 @@ export class MarsFlightEngine {
     if (document.hidden) {
       this.keysHeld.clear();
       this.uiBoostHeld = false;
+      this.pendingBarrelRoll = 0;
     }
   };
 
@@ -752,6 +829,7 @@ export class MarsFlightEngine {
     window.addEventListener('keydown', this.onKeyDown, { passive: false });
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('mousemove', this.onMouseMove, { passive: true });
+    window.addEventListener('pointerdown', this.onPointerDown, { passive: true });
     window.addEventListener('touchstart', this.onTouchStart, { passive: true });
     window.addEventListener('touchmove', this.onTouchMove, { passive: true });
     window.addEventListener('touchend', this.onTouchEnd, { passive: true });
@@ -802,12 +880,23 @@ export class MarsFlightEngine {
     this._controlInput.steerX = this.inputMode === 'keyboard' ? kx : this.pointerSteerX;
     this._controlInput.steerY = this.inputMode === 'keyboard' ? ky : this.pointerSteerY;
     this._controlInput.boost = this.keysHeld.has('Space') || this.uiBoostHeld;
+    this._controlInput.barrelRoll = this.pendingBarrelRoll;
+    this.pendingBarrelRoll = 0;
     return this._controlInput;
   }
 
   private syncCraftTransform(dt: number): void {
     this._craftPos.set(this.flight.x, this.flight.y, this.flight.z);
-    this._craftEuler.set(this.flight.pitch, this.flight.yaw, this.flight.roll, 'YXZ');
+    // Decoupled flight orientation (steady horizon for Chase/Wing/Cockpit) vs spinning craft mesh
+    this._flightEuler.set(this.flight.pitch, this.flight.yaw, this.flight.roll, 'YXZ');
+    this._flightQuat.setFromEuler(this._flightEuler);
+
+    this._craftEuler.set(
+      this.flight.pitch,
+      this.flight.yaw,
+      this.flight.roll + this.flight.barrelRollAngle,
+      'YXZ',
+    );
     this._craftQuat.setFromEuler(this._craftEuler);
 
     this.spacecraft.group.position.copy(this._craftPos);
@@ -836,6 +925,9 @@ export class MarsFlightEngine {
         this.flight.roll,
         this._craftPos,
         this._craftQuat,
+        this.flight.barrelRollTimer > 0,
+        this.flight.barrelRollAngle,
+        this.flight.barrelRollDir,
       );
       this.pushFxTrailSample();
     }
@@ -893,9 +985,10 @@ export class MarsFlightEngine {
         : 0;
 
     if (this.cameraView === 'cockpit' && !this.flight.crashed) {
-      // 2. First-Person Cockpit View: inside glass canopy looking cleanly over the tapered needle nose
-      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._craftQuat).add(this._craftPos);
-      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._craftQuat).add(this._craftPos);
+      // 2. First-Person Cockpit View: inside glass canopy looking cleanly over the tapered needle nose.
+      // During a Snap Barrel Roll, tilt briskly through a crisp, comfortable horizon twist and snap level immediately.
+      this._camTargetPos.set(0, 0.74, -1.35).applyQuaternion(this._flightQuat).add(this._craftPos);
+      this._camLookAt.set(0, 0.35, -72).applyQuaternion(this._flightQuat).add(this._craftPos);
       this.camera.position.copy(this._camTargetPos);
       this._curCamLook.copy(this._camLookAt);
 
@@ -906,19 +999,33 @@ export class MarsFlightEngine {
         this.camera.position.y += (Math.random() - 0.5) * amp;
       }
 
-      // Authentic roll tilt from spacecraft orientation
-      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._craftQuat);
-      this.camera.up.lerp(this._camUpScratch, 1 - Math.exp(-16 * dt));
+      const rollProgress =
+        this.flight.barrelRollTimer > 0
+          ? 1 - this.flight.barrelRollTimer / BARREL_ROLL_DURATION_SEC
+          : 0;
+      const cockpitRollTwist =
+        this.flight.barrelRollTimer > 0
+          ? -this.flight.barrelRollDir * Math.sin(rollProgress * Math.PI) * 0.6
+          : 0;
+      this._cockpitRollEuler.set(
+        this.flight.pitch,
+        this.flight.yaw,
+        this.flight.roll + cockpitRollTwist,
+        'YXZ',
+      );
+      this._cockpitRollQuat.setFromEuler(this._cockpitRollEuler);
+      this._camUpScratch.set(0, 1, 0).applyQuaternion(this._cockpitRollQuat);
+      this.camera.up.lerp(this._camUpScratch, 1 - Math.exp(-22 * dt));
       this.camera.lookAt(this._curCamLook);
     } else if (this.cameraView === 'wing' && !this.flight.crashed) {
-      // 3. Wing-Tip Action View: dramatic starboard wing mount showcasing glowing blue-and-red thruster plume + needle nose!
+      // 3. Wing-Tip Action View: steady, horizon-level wing mount so the jet dramatically whips 360° in front of the lens!
       this.camera.up.set(0, 1, 0);
       const boostBack = this.flight.isBoosting ? 0.72 : 0;
       this._camTargetPos
         .set(4.85, 0.76, 4.45 + boostBack)
-        .applyQuaternion(this._craftQuat)
+        .applyQuaternion(this._flightQuat)
         .add(this._craftPos);
-      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._craftQuat).add(this._craftPos);
+      this._camLookAt.set(-0.35, 0.14, -30).applyQuaternion(this._flightQuat).add(this._craftPos);
 
       this.camera.position.x = damp(this.camera.position.x, this._camTargetPos.x, 18, dt);
       this.camera.position.y = damp(this.camera.position.y, this._camTargetPos.y, 18, dt);
@@ -1133,6 +1240,7 @@ export class MarsFlightEngine {
         this._projX[step] = (this._projScratch.x * 0.5 + 0.5) * w;
         this._projY[step] = (-this._projScratch.y * 0.5 + 0.5) * h;
         this._projValid[step] = 1;
+        this._projRolling[step] = sample.isRolling ? 1 : 0;
         validCount++;
       }
 
@@ -1154,10 +1262,35 @@ export class MarsFlightEngine {
 
         // Skip huge jump if a point wrapped offscreen near clip plane
         const segLenSq = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1);
-        if (segLenSq > w * w * 0.35) continue;
+        if (segLenSq > w * w * 0.22) continue;
 
         const t = step / (desiredSegments - 1); // 0 at craft -> 1 at tail tip
-        const fade = Math.pow(1 - t, 1.6);
+        const isCorkscrewWing =
+          !isCenter && (this._projRolling[step] === 1 || this._projRolling[step + 1] === 1);
+        const fade = Math.pow(1 - t, isCorkscrewWing ? 1.45 : 1.6);
+
+        if (isCorkscrewWing) {
+          // Crisp, sleek pure-white spiraling corkscrew air-vapor ribbons behind both wingtips during Snap Barrel Roll
+          const haloAlpha = Math.min(0.76, (0.48 + machNorm * 0.22) * fade);
+          if (haloAlpha > 0.01) {
+            ctx.strokeStyle = `rgba(232, 249, 255, ${haloAlpha.toFixed(3)})`;
+            ctx.lineWidth = Math.max(1.2, Math.min(7.5, baseOuterWidth * 0.82 * (0.24 + 0.76 * fade)));
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+          }
+          const coreAlpha = Math.min(0.95, 0.92 * fade);
+          if (coreAlpha > 0.015) {
+            ctx.strokeStyle = `rgba(255, 255, 255, ${coreAlpha.toFixed(3)})`;
+            ctx.lineWidth = Math.max(0.8, Math.min(3.4, baseCoreWidth * 1.05 * (0.22 + 0.78 * fade)));
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+          }
+          continue;
+        }
 
         // Pass 1: Luminous plasma glow halo (fiery crimson-red on center exhaust during boost, cool Mach cyan on wingtips)
         const outerAlpha = Math.min(0.92, baseOpacity * alphaScale * fade * (boosting && isCenter ? 0.86 : 0.6));
@@ -1340,6 +1473,12 @@ export class MarsFlightEngine {
       cameraView: this.cameraView,
       roll: this.flight.roll,
       pitch: this.flight.pitch,
+      barrelRollCharge: Math.max(
+        0,
+        Math.min(1, 1 - this.flight.barrelRollCooldown / BARREL_ROLL_COOLDOWN_SEC),
+      ),
+      barrelRollActive: this.flight.barrelRollTimer > 0,
+      barrelRollDir: this.flight.barrelRollDir,
     });
   }
 
@@ -1439,6 +1578,20 @@ export class MarsFlightEngine {
         });
         this.flight = nextFlight;
 
+        if (events.barrelRollStarted !== null) {
+          this.audio.playBarrelRoll();
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.14);
+          this.nearMissFovKick = Math.max(this.nearMissFovKick, 3.2);
+          this.emitTelemetryNow();
+        }
+
+        if (events.barrelRollDeflect) {
+          this.audio.playRollDeflect();
+          this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.24);
+          this.world.spawnNearMissSparks(this.flight.x, this.flight.y, this.flight.z);
+          this.world.spawnGateSparks(this.flight.x, this.flight.y, this.flight.z);
+        }
+
         if (events.boostStarted) {
           this.audio.playBoostIgnite();
           this.spacecraft.triggerShockwave(0.65);
@@ -1460,12 +1613,14 @@ export class MarsFlightEngine {
           this.nearMissFovKick = Math.max(this.nearMissFovKick, 6.8);
           this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.25);
           this.callbacks.onGateFlash();
-          this.callbacks.onBanner({
-            id: this.bannerSeq++,
-            kind: 'gate',
-            label: `SPEED GATE x${gp.multiplier}`,
-            sublabel: `+${gp.bonusScore} · +${Math.round(gp.boostRefill * 100)}% BOOST`,
-          });
+          if (!events.barrelRollBonus) {
+            this.callbacks.onBanner({
+              id: this.bannerSeq++,
+              kind: 'gate',
+              label: `SPEED GATE x${gp.multiplier}`,
+              sublabel: `+${gp.bonusScore} · +${Math.round(gp.boostRefill * 100)}% BOOST`,
+            });
+          }
           this.emitTelemetryNow();
         }
 
@@ -1488,12 +1643,30 @@ export class MarsFlightEngine {
           this.nearMissFovKick = 6.0;
           this.world.spawnNearMissSparks(this.flight.x, this.flight.y, this.flight.z);
           this.callbacks.onNearMissFlash();
+          if (!events.barrelRollBonus) {
+            this.callbacks.onBanner({
+              id: this.bannerSeq++,
+              kind: 'near-miss',
+              label: 'NEAR MISS',
+              sublabel: `+${events.nearMiss.bonusScore} · +${events.nearMiss.machGain.toFixed(2)} MACH`,
+            });
+          }
+        }
+
+        if (events.barrelRollBonus) {
+          const rb = events.barrelRollBonus;
+          if (rb.kind === 'stylish') {
+            this.callbacks.onGateFlash();
+          } else {
+            this.callbacks.onNearMissFlash();
+          }
           this.callbacks.onBanner({
             id: this.bannerSeq++,
-            kind: 'near-miss',
-            label: 'NEAR MISS',
-            sublabel: `+${events.nearMiss.bonusScore} · +${events.nearMiss.machGain.toFixed(2)} MACH`,
+            kind: 'roll',
+            label: rb.kind === 'stylish' ? 'STYLISH ROLL' : 'EVASIVE ROLL',
+            sublabel: `+${rb.bonusScore} · +${Math.round(rb.boostRefill * 100)}% BOOST`,
           });
+          this.emitTelemetryNow();
         }
 
         if (events.milestoneMach !== null) {
@@ -1570,6 +1743,7 @@ export class MarsFlightEngine {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mousemove', this.onMouseMove);
+    window.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('touchstart', this.onTouchStart);
     window.removeEventListener('touchmove', this.onTouchMove);
     window.removeEventListener('touchend', this.onTouchEnd);

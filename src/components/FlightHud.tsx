@@ -17,6 +17,7 @@ interface FlightHudProps {
   onCycleCamera: () => void;
   onBoostStart: () => void;
   onBoostEnd: () => void;
+  onBarrelRoll: (dir: -1 | 1) => void;
 }
 
 const CAMERA_BUTTON_SHORT: Record<CameraViewMode, string> = {
@@ -47,8 +48,10 @@ export const FlightHud: React.FC<FlightHudProps> = ({
   onCycleCamera,
   onBoostStart,
   onBoostEnd,
+  onBarrelRoll,
 }) => {
   const boostPercent = Math.round(telemetry.boostCharge * 100);
+  const rollReady = telemetry.barrelRollCharge >= 0.995 && !telemetry.barrelRollActive;
   const isHighMach = telemetry.mach >= 2.0;
   const isExtremeMach = telemetry.mach >= 3.0;
   const isCockpit = cameraView === 'cockpit';
@@ -338,15 +341,17 @@ export const FlightHud: React.FC<FlightHudProps> = ({
               className={`font-display font-bold italic tracking-[0.14em] uppercase ${
                 banner.kind === 'camera'
                   ? 'shockwave-glow text-xl sm:text-2xl text-[#e0f7ff]'
-                  : banner.kind === 'gate'
-                    ? 'gate-glow text-2xl sm:text-4xl text-[#67f2ff]'
-                    : banner.kind === 'near-miss'
-                      ? 'near-miss-glow text-2xl sm:text-4xl text-[#fde047]'
-                      : banner.kind === 'scrape'
-                        ? 'near-miss-glow text-2xl sm:text-4xl text-[#fb923c]'
-                        : banner.kind === 'zone'
-                          ? 'near-miss-glow text-2xl sm:text-4xl text-[#fff3e2]'
-                          : 'shockwave-glow text-2xl sm:text-4xl text-[#bae6fd]'
+                  : banner.kind === 'roll'
+                    ? 'shockwave-glow text-2xl sm:text-4xl text-[#ffffff]'
+                    : banner.kind === 'gate'
+                      ? 'gate-glow text-2xl sm:text-4xl text-[#67f2ff]'
+                      : banner.kind === 'near-miss'
+                        ? 'near-miss-glow text-2xl sm:text-4xl text-[#fde047]'
+                        : banner.kind === 'scrape'
+                          ? 'near-miss-glow text-2xl sm:text-4xl text-[#fb923c]'
+                          : banner.kind === 'zone'
+                            ? 'near-miss-glow text-2xl sm:text-4xl text-[#fff3e2]'
+                            : 'shockwave-glow text-2xl sm:text-4xl text-[#bae6fd]'
               }`}
             >
               {banner.label}
@@ -474,53 +479,163 @@ export const FlightHud: React.FC<FlightHudProps> = ({
               )}
             </div>
           </div>
+
+          {/* Crisp Snap Barrel Roll readiness dot & thin bar tucked neatly under the Boost Bar */}
+          <div
+            data-testid="hud-roll-ready"
+            data-ready={rollReady ? 'true' : 'false'}
+            className="mt-2 flex items-center gap-2"
+          >
+            <span
+              aria-hidden="true"
+              className={`h-2 w-2 shrink-0 rounded-full transition-all duration-150 ${
+                telemetry.barrelRollActive
+                  ? 'bg-[#67f2ff] shadow-[0_0_10px_#67f2ff]'
+                  : rollReady
+                    ? 'bg-[#ffffff] shadow-[0_0_9px_rgba(255,255,255,0.95)]'
+                    : 'bg-[#f5ccb0]/35'
+              }`}
+            />
+            <span
+              className={`font-telemetry text-[10px] font-semibold tracking-[0.12em] uppercase ${
+                telemetry.barrelRollActive
+                  ? 'text-[#67f2ff]'
+                  : rollReady
+                    ? 'text-[#ffffff]'
+                    : 'text-[#f5ccb0]/62'
+              }`}
+            >
+              {telemetry.barrelRollActive ? 'ROLLING' : rollReady ? 'ROLL READY' : 'ROLL'}
+            </span>
+            <div className="relative h-1.5 flex-1 overflow-hidden rounded-[2px] bg-[#31130b]">
+              <div
+                className="h-full origin-left transition-transform duration-75"
+                style={{
+                  transform: `scaleX(${Math.max(0, Math.min(1, telemetry.barrelRollCharge))})`,
+                  background: telemetry.barrelRollActive
+                    ? 'linear-gradient(90deg, #67f2ff, #ffffff)'
+                    : rollReady
+                      ? '#ffffff'
+                      : 'rgba(255, 255, 255, 0.68)',
+                  boxShadow: rollReady ? '0 0 10px rgba(255, 255, 255, 0.9)' : 'none',
+                }}
+              />
+            </div>
+            <span className="font-telemetry text-[10px] text-[#f5ccb0]/65">Q / E</span>
+          </div>
         </div>
 
-        {/* Press-and-hold Afterburner Boost control (Spacebar or Mouse/Touch hold) */}
-        <button
-          type="button"
-          tabIndex={-1}
-          disabled={telemetry.boostOverheated}
-          aria-label="Hold to fire afterburners"
-          onPointerDown={(e) => {
-            if (telemetry.boostOverheated) return;
-            e.preventDefault();
-            e.currentTarget.setPointerCapture?.(e.pointerId);
-            onBoostStart();
-          }}
-          onPointerUp={(e) => {
-            e.currentTarget.blur();
-            onBoostEnd();
-          }}
-          onPointerCancel={onBoostEnd}
-          onLostPointerCapture={onBoostEnd}
-          className={`pointer-events-auto font-display flex h-14 sm:h-16 min-w-[118px] sm:min-w-[148px] flex-col items-center justify-center rounded-sm border px-5 transition-transform duration-100 active:scale-[0.97] whitespace-nowrap ${
-            telemetry.boostOverheated
-              ? 'border-[#f97316]/60 bg-[#2d1007]/88 text-[#fdba74] cursor-not-allowed'
-              : telemetry.isBoosting
-                ? 'border-[#ff6b7a] bg-gradient-to-r from-[#0ea5e9] via-[#22d3ee] to-[#e11d48] text-[#fff8f8] shadow-[0_0_26px_rgba(255,44,72,0.62)] cursor-pointer'
-                : 'border-[#7dd3fc]/45 bg-[#160805]/84 text-[#e0f6ff] hover:border-[#bae6fd]/75 hover:bg-[#1e100d]/92 cursor-pointer'
-          }`}
-        >
-          <span className="text-sm sm:text-base font-bold tracking-[0.16em] uppercase">
-            {telemetry.boostOverheated
-              ? 'COOLING'
-              : telemetry.isBoosting
-                ? 'BOOSTING'
-                : 'BOOST'}
-          </span>
-          <span
-            className={`font-telemetry text-[10px] tracking-[0.1em] ${
-              telemetry.boostOverheated
-                ? 'text-[#fb923c]/90'
-                : telemetry.isBoosting
-                  ? 'text-[#081520]/80'
-                  : 'text-[#9bdcf8]/80'
+        {/* Bottom-right flight action cluster: Left/Right Snap Roll icon buttons + Hold Boost button */}
+        <div className="flex items-end gap-2">
+          <button
+            type="button"
+            tabIndex={-1}
+            data-testid="roll-left-btn"
+            aria-label="Snap barrel roll left"
+            title="Snap Barrel Roll Left (Q or Double-Tap Left)"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onBarrelRoll(-1);
+            }}
+            className={`pointer-events-auto font-display flex h-14 sm:h-16 w-12 sm:w-14 flex-col items-center justify-center rounded-sm border transition-all duration-120 active:scale-[0.95] cursor-pointer ${
+              telemetry.barrelRollActive && telemetry.barrelRollDir === -1
+                ? 'border-[#ffffff] bg-[#0ea5e9]/90 text-[#ffffff] shadow-[0_0_20px_rgba(255,255,255,0.65)]'
+                : rollReady
+                  ? 'border-[#ffffff]/60 bg-[#160805]/84 text-[#ffffff] shadow-[0_0_12px_rgba(255,255,255,0.2)] hover:border-[#ffffff] hover:bg-[#23120e]/92'
+                  : 'border-[#ffd8bc]/22 bg-[#160805]/70 text-[#f5ccb0]/45'
             }`}
           >
-            {telemetry.boostOverheated ? 'WAIT 25%' : 'HOLD SPACE'}
-          </span>
-        </button>
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
+              <path
+                d="M7 9.5a6.5 6.5 0 1 1 1.6 7.8M7 9.5V5.5M7 9.5h4"
+                stroke="currentColor"
+                strokeWidth="2.1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span className="font-telemetry mt-0.5 text-[9px] font-bold tracking-[0.08em]">Q</span>
+          </button>
+
+          <button
+            type="button"
+            tabIndex={-1}
+            data-testid="roll-right-btn"
+            aria-label="Snap barrel roll right"
+            title="Snap Barrel Roll Right (E or Double-Tap Right)"
+            onPointerDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onBarrelRoll(1);
+            }}
+            className={`pointer-events-auto font-display flex h-14 sm:h-16 w-12 sm:w-14 flex-col items-center justify-center rounded-sm border transition-all duration-120 active:scale-[0.95] cursor-pointer ${
+              telemetry.barrelRollActive && telemetry.barrelRollDir === 1
+                ? 'border-[#ffffff] bg-[#0ea5e9]/90 text-[#ffffff] shadow-[0_0_20px_rgba(255,255,255,0.65)]'
+                : rollReady
+                  ? 'border-[#ffffff]/60 bg-[#160805]/84 text-[#ffffff] shadow-[0_0_12px_rgba(255,255,255,0.2)] hover:border-[#ffffff] hover:bg-[#23120e]/92'
+                  : 'border-[#ffd8bc]/22 bg-[#160805]/70 text-[#f5ccb0]/45'
+            }`}
+          >
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
+              <path
+                d="M17 9.5a6.5 6.5 0 1 0-1.6 7.8M17 9.5V5.5M17 9.5h-4"
+                stroke="currentColor"
+                strokeWidth="2.1"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span className="font-telemetry mt-0.5 text-[9px] font-bold tracking-[0.08em]">E</span>
+          </button>
+
+          {/* Press-and-hold Afterburner Boost control (Spacebar or Mouse/Touch hold) */}
+          <button
+            type="button"
+            tabIndex={-1}
+            disabled={telemetry.boostOverheated}
+            aria-label="Hold to fire afterburners"
+            onPointerDown={(e) => {
+              if (telemetry.boostOverheated) return;
+              e.preventDefault();
+              e.stopPropagation();
+              e.currentTarget.setPointerCapture?.(e.pointerId);
+              onBoostStart();
+            }}
+            onPointerUp={(e) => {
+              e.currentTarget.blur();
+              onBoostEnd();
+            }}
+            onPointerCancel={onBoostEnd}
+            onLostPointerCapture={onBoostEnd}
+            className={`pointer-events-auto font-display flex h-14 sm:h-16 min-w-[114px] sm:min-w-[144px] flex-col items-center justify-center rounded-sm border px-5 transition-transform duration-100 active:scale-[0.97] whitespace-nowrap ${
+              telemetry.boostOverheated
+                ? 'border-[#f97316]/60 bg-[#2d1007]/88 text-[#fdba74] cursor-not-allowed'
+                : telemetry.isBoosting
+                  ? 'border-[#ff6b7a] bg-gradient-to-r from-[#0ea5e9] via-[#22d3ee] to-[#e11d48] text-[#fff8f8] shadow-[0_0_26px_rgba(255,44,72,0.62)] cursor-pointer'
+                  : 'border-[#7dd3fc]/45 bg-[#160805]/84 text-[#e0f6ff] hover:border-[#bae6fd]/75 hover:bg-[#1e100d]/92 cursor-pointer'
+            }`}
+          >
+            <span className="text-sm sm:text-base font-bold tracking-[0.16em] uppercase">
+              {telemetry.boostOverheated
+                ? 'COOLING'
+                : telemetry.isBoosting
+                  ? 'BOOSTING'
+                  : 'BOOST'}
+            </span>
+            <span
+              className={`font-telemetry text-[10px] tracking-[0.1em] ${
+                telemetry.boostOverheated
+                  ? 'text-[#fb923c]/90'
+                  : telemetry.isBoosting
+                    ? 'text-[#081520]/80'
+                    : 'text-[#9bdcf8]/80'
+              }`}
+            >
+              {telemetry.boostOverheated ? 'WAIT 25%' : 'HOLD SPACE'}
+            </span>
+          </button>
+        </div>
       </div>
     </div>
   );

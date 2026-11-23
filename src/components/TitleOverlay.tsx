@@ -290,7 +290,7 @@ export const TitleOverlay: React.FC<TitleOverlayProps> = ({
       {/* Bottom safe margin: single flat borderless control hint line */}
       <div className="flex justify-center pb-1">
         <p className="hud-text-shadow text-center text-xs sm:text-sm font-medium tracking-[0.06em] text-[#ffead8]/90">
-          Arrows / WASD / Mouse Steer · Hold Space Afterburner · C Camera · P Pause
+          Arrows / WASD / Mouse Steer · Q / E or Double-Tap Roll · Hold Space Boost · C Camera · P Pause
         </p>
       </div>
     </div>

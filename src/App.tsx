@@ -45,6 +45,9 @@ const INITIAL_TELEMETRY: FlightTelemetry = {
   cameraView: 'chase',
   roll: 0,
   pitch: 0,
+  barrelRollCharge: 1,
+  barrelRollActive: false,
+  barrelRollDir: 0,
 };
 
 export default function App() {
@@ -200,6 +203,10 @@ export default function App() {
     engineRef.current?.setBoostButtonHeld(false);
   }, []);
 
+  const handleBarrelRoll = useCallback((dir: -1 | 1) => {
+    engineRef.current?.triggerBarrelRoll(dir);
+  }, []);
+
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-gradient-to-b from-[#3d1510] via-[#9e3b1d] to-[#c95a2b]">
       {/* Dedicated isolated WebGL canvas container (never re-created on HUD updates) */}
@@ -245,6 +252,7 @@ export default function App() {
           onCycleCamera={handleCycleCamera}
           onBoostStart={handleBoostStart}
           onBoostEnd={handleBoostEnd}
+          onBarrelRoll={handleBarrelRoll}
         />
       )}
 

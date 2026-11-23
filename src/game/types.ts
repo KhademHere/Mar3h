@@ -76,6 +76,8 @@ export interface ControlInput {
   steerY: number;
   /** True while Spacebar or Boost button is held */
   boost: boolean;
+  /** One-shot Snap Barrel Roll trigger: -1 left, +1 right, 0/undefined none */
+  barrelRoll?: -1 | 0 | 1;
 }
 
 export interface FlightTelemetry {
@@ -105,6 +107,11 @@ export interface FlightTelemetry {
   /** Craft roll & pitch in radians for subtle live cockpit horizon line */
   roll: number;
   pitch: number;
+  /** 0..1 barrel roll readiness (1 = ready, glows bright white) */
+  barrelRollCharge: number;
+  /** True while mid-spin in a Snap Barrel Roll */
+  barrelRollActive: boolean;
+  barrelRollDir: -1 | 0 | 1;
 }
 
 export interface RunSummary {
@@ -125,7 +132,7 @@ export interface RunSummary {
 
 export interface HudBannerEvent {
   id: number;
-  kind: 'near-miss' | 'shockwave' | 'scrape' | 'zone' | 'gate' | 'camera';
+  kind: 'near-miss' | 'shockwave' | 'scrape' | 'zone' | 'gate' | 'camera' | 'roll';
   label: string;
   sublabel: string;
 }

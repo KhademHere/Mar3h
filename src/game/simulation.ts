@@ -28,6 +28,9 @@ export const MAX_DT = 0.05;
 /** Minimum boost energy required to recover after overheating the Boost Bar to empty */
 export const BOOST_OVERHEAT_RECOVERY_THRESHOLD = 0.25;
 export const BOOST_OVERHEAT_COOLDOWN_SEC = 2.0;
+/** Crisp 360-degree Snap Barrel Roll spin duration & cooldown */
+export const BARREL_ROLL_DURATION_SEC = 0.44;
+export const BARREL_ROLL_COOLDOWN_SEC = 1.5;
 
 export interface FlightState {
   difficulty: DifficultyId;
@@ -39,6 +42,23 @@ export interface FlightState {
   roll: number;
   pitch: number;
   yaw: number;
+  /** Remaining duration of active Snap Barrel Roll spin (0 = inactive) */
+  barrelRollTimer: number;
+  /** Direction of active/last Snap Barrel Roll: -1 left, +1 right, 0 none */
+  barrelRollDir: -1 | 0 | 1;
+  /** Current spin angle in radians (0 -> -dir * 2*PI during roll) */
+  barrelRollAngle: number;
+  /** Cooldown remaining before next barrel roll can fire (0 = ready) */
+  barrelRollCooldown: number;
+  /** Brief tail window after roll finishes so gate/cliff bonuses right on exit feel snappy */
+  barrelRollGraceTimer: number;
+  /** Prevents duplicate stylish/evasive popups within the same roll */
+  barrelRollBonusAwarded: boolean;
+  /** Timestamp of Autoplay's last celebratory showmanship roll (keeps rolls naturally spaced) */
+  lastShowRollTime: number;
+  /** Timestamp of most recent Speed Gate pass / Mach milestone for Autoplay celebratory rolls */
+  recentCelebrationTimer: number;
+  passedArchIds: string[];
   baseMach: number;
   boostMach: number;
   nearMissMach: number;
@@ -93,6 +113,13 @@ export interface FlightStepEvents {
   crashed: boolean;
   boostStarted: boolean;
   boostOverheated: boolean;
+  barrelRollStarted: -1 | 1 | null;
+  barrelRollDeflect: boolean;
+  barrelRollBonus: {
+    kind: 'stylish' | 'evasive';
+    bonusScore: number;
+    boostRefill: number;
+  } | null;
 }
 
 export function createInitialFlightState(difficulty: DifficultyId = 'easy'): FlightState {
@@ -110,6 +137,15 @@ export function createInitialFlightState(difficulty: DifficultyId = 'easy'): Fli
     roll: 0,
     pitch: 0,
     yaw: 0,
+    barrelRollTimer: 0,
+    barrelRollDir: 0,
+    barrelRollAngle: 0,
+    barrelRollCooldown: 0,
+    barrelRollGraceTimer: 0,
+    barrelRollBonusAwarded: false,
+    lastShowRollTime: -10,
+    recentCelebrationTimer: 0,
+    passedArchIds: [],
     baseMach: cfg.startMach,
     boostMach: 0,
     nearMissMach: 0,
@@ -652,7 +688,79 @@ export function computeAutoplayInput(
     }
   }
 
-  return { steerX, steerY, boost };
+  // --- Phase 4: Ace Autoplay Snap Barrel Roll (Safety-First Tight-Gap Dodges + Cinematic Showmanship!) ---
+  let barrelRoll: -1 | 0 | 1 = 0;
+  if (isGameplayAutoplay && state.barrelRollCooldown <= 0 && state.barrelRollTimer <= 0) {
+    // Helper verifying clear canyon & obstacle space in a candidate roll direction so Autoplay never rolls into a wall!
+    const isRollDirectionSafe = (dir: -1 | 1): boolean => {
+      const lateralDisp = dir * (16 + Math.min(8, (state.mach - 1) * 3.5));
+      for (let step = 1; step <= 3; step++) {
+        const frac = step / 3;
+        const sampleZ = state.z - speed * BARREL_ROLL_DURATION_SEC * frac;
+        const sampleX = state.x + lateralDisp * Math.sin(frac * Math.PI * 0.5);
+        const cAtZ = getCanyonCenterX(sampleZ, diff);
+        const hwAtZ = getCanyonHalfWidth(sampleZ, diff);
+        // Never roll close to canyon walls
+        if (Math.abs(sampleX - cAtZ) > hwAtZ * 0.64) return false;
+        const groundAtSample = getTerrainHeight(sampleX, sampleZ, diff);
+        if (state.y < groundAtSample + 8.5) return false;
+        // Verify clear of solid obstacles along the lateral snap path
+        const tSample = worldTime + BARREL_ROLL_DURATION_SEC * frac;
+        for (let k = 0; k < upcoming.length; k++) {
+          const obs = upcoming[k].obs;
+          if (Math.abs(obs.z - sampleZ) > obs.thickness + 26) continue;
+          const clr = evaluateObstacleClearance(sampleX, state.y, sampleZ, obs, 3.6, tSample);
+          if (clr < 5.5) return false;
+        }
+      }
+      return true;
+    };
+
+    const deltaX = targetX - state.x;
+    const dodgeDir: -1 | 1 = deltaX >= 0 ? 1 : -1;
+    const urgentClusterAhead = upcoming.some(
+      (u) =>
+        u.distAhead > 12 &&
+        u.distAhead < (isHard ? 165 : isMedium ? 140 : 120) &&
+        (u.obs.kind === 'split-pillar' ||
+          u.obs.kind === 'overhang' ||
+          u.obs.kind === 'spire' ||
+          u.obs.kind === 'buttress' ||
+          u.obs.kind === 'comm-tower' ||
+          u.obs.kind === 'solar-array' ||
+          u.obs.kind === 'dust-devil'),
+    );
+
+    // 4A. Decisive Tight-Gap / Emergency Snap Dodge (especially on Medium & Hard gauntlets!)
+    const dodgeThreshold = isHard ? 9.5 : isMedium ? 11.5 : 14.5;
+    if (urgentClusterAhead && Math.abs(deltaX) >= dodgeThreshold && isRollDirectionSafe(dodgeDir)) {
+      barrelRoll = dodgeDir;
+    } else if (
+      // 4B. Cinematic Showmanship: spaced out naturally when clearing a Speed Gate, stone arch, or Mach milestone!
+      state.survivalSeconds - state.lastShowRollTime >= (isHard ? 7.0 : 5.5) &&
+      !tightObstacleAhead
+    ) {
+      const approachingGateCenter =
+        huntingGate &&
+        gateDist > 26 &&
+        gateDist < 95 &&
+        Math.abs(huntingGate.x - state.x) < 9.5 &&
+        Math.abs(huntingGate.y - state.y) < 8.5;
+
+      const celebratoryMoment = state.recentCelebrationTimer > 0 || Boolean(approachingGateCenter);
+      if (celebratoryMoment) {
+        // Choose the roll direction toward the center of the canyon so it always feels sleek & controlled
+        const preferDir: -1 | 1 = state.x > canyonCenter ? -1 : 1;
+        if (isRollDirectionSafe(preferDir)) {
+          barrelRoll = preferDir;
+        } else if (isRollDirectionSafe((preferDir * -1) as -1 | 1)) {
+          barrelRoll = (preferDir * -1) as -1 | 1;
+        }
+      }
+    }
+  }
+
+  return { steerX, steerY, boost, barrelRoll };
 }
 
 /**
@@ -685,6 +793,9 @@ export function stepFlightSimulation(
     crashed: false,
     boostStarted: false,
     boostOverheated: false,
+    barrelRollStarted: null,
+    barrelRollDeflect: false,
+    barrelRollBonus: null,
   };
 
   if (prev.crashed || dt <= 0) {
@@ -695,6 +806,7 @@ export function stepFlightSimulation(
     ...prev,
     triggeredObstacleIds: prev.triggeredObstacleIds,
     resolvedGateIds: prev.resolvedGateIds,
+    passedArchIds: prev.passedArchIds,
   };
 
   const titleAutopilot = Boolean(options?.autopilot);
@@ -722,16 +834,69 @@ export function stepFlightSimulation(
       ...getSpeedGatesForChunk(chunkIdx + 2, diff),
     ];
 
-  // Determine effective steering & boost intent
+  // Determine effective steering, boost & Snap Barrel Roll trigger
   let steerX = Math.max(-1, Math.min(1, input.steerX));
   let steerY = Math.max(-1, Math.min(1, input.steerY));
   let wantsBoost = input.boost;
+  let wantsBarrelRoll: -1 | 0 | 1 = input.barrelRoll ?? 0;
 
   if (titleAutopilot || gameplayAutoplay) {
     const ai = computeAutoplayInput(prev, obstacles, gameplayAutoplay, prev.survivalSeconds, gates);
     steerX = ai.steerX;
     steerY = ai.steerY;
     wantsBoost = ai.boost;
+    wantsBarrelRoll = ai.barrelRoll ?? 0;
+  }
+
+  // --- Snap Barrel Roll Cooldown, 360-Degree Spin & Lateral Snap Dodge State Machine ---
+  if (next.barrelRollCooldown > 0) {
+    next.barrelRollCooldown = Math.max(0, next.barrelRollCooldown - dt);
+  }
+  if (next.barrelRollGraceTimer > 0) {
+    next.barrelRollGraceTimer = Math.max(0, next.barrelRollGraceTimer - dt);
+  }
+  if (next.recentCelebrationTimer > 0) {
+    next.recentCelebrationTimer = Math.max(0, next.recentCelebrationTimer - dt);
+  }
+
+  if (
+    !titleAutopilot &&
+    wantsBarrelRoll !== 0 &&
+    next.barrelRollCooldown <= 0 &&
+    next.barrelRollTimer <= 0
+  ) {
+    next.barrelRollDir = wantsBarrelRoll;
+    next.barrelRollTimer = BARREL_ROLL_DURATION_SEC;
+    next.barrelRollCooldown = BARREL_ROLL_COOLDOWN_SEC;
+    next.barrelRollGraceTimer = BARREL_ROLL_DURATION_SEC + 0.2;
+    next.barrelRollBonusAwarded = false;
+    next.barrelRollAngle = 0;
+    events.barrelRollStarted = wantsBarrelRoll;
+    if (gameplayAutoplay && next.recentCelebrationTimer > 0) {
+      next.lastShowRollTime = next.survivalSeconds;
+      next.recentCelebrationTimer = 0;
+    }
+  }
+
+  let barrelRollLateralBurst = 0;
+  if (next.barrelRollTimer > 0) {
+    next.barrelRollTimer = Math.max(0, next.barrelRollTimer - dt);
+    const progress = 1 - next.barrelRollTimer / BARREL_ROLL_DURATION_SEC; // 0 -> 1
+    // Smooth ease-in-out S-curve for crisp, snappy 360-degree spin
+    const smoothT = progress < 0.5
+      ? 2 * progress * progress
+      : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+    // Rolling right (+1) spins clockwise (-Z rotation); rolling left (-1) spins counterclockwise (+Z)
+    next.barrelRollAngle = -next.barrelRollDir * smoothT * Math.PI * 2;
+    // Bell-curve sideways snap dodge velocity burst (~16m sharp lateral evasion!)
+    const snapPulse = Math.sin(progress * Math.PI);
+    barrelRollLateralBurst = next.barrelRollDir * (74 + next.mach * 14) * snapPulse;
+
+    if (next.barrelRollTimer <= 0) {
+      next.barrelRollAngle = 0;
+    }
+  } else {
+    next.barrelRollAngle = 0;
   }
 
   // --- Afterburner Boost Bar & Overheat Cooldown Rules (shared identically by Player & Autoplay) ---
@@ -794,6 +959,7 @@ export function stepFlightSimulation(
     if (next.mach >= nextMilestone) {
       next.lastMilestoneMach = Math.floor(next.mach * 2) / 2;
       events.milestoneMach = next.lastMilestoneMach;
+      next.recentCelebrationTimer = Math.max(next.recentCelebrationTimer, 1.35);
     }
   }
 
@@ -803,12 +969,19 @@ export function stepFlightSimulation(
   const lateralAuthority = (66 + (next.mach - 1) * 16) * agilityScale;
   const verticalAuthority = (46 + (next.mach - 1) * 9) * agilityScale;
 
-  const targetVx = steerX * lateralAuthority;
+  const targetVx = steerX * lateralAuthority + barrelRollLateralBurst;
   const targetVy = steerY * verticalAuthority;
 
-  const steeringResponse = diff === 'hard' ? 11.4 : diff === 'medium' ? 10.4 : 9.6;
+  const steeringResponse =
+    next.barrelRollTimer > 0
+      ? 18.5
+      : diff === 'hard'
+        ? 11.4
+        : diff === 'medium'
+          ? 10.4
+          : 9.6;
   next.vx = damp(next.vx, targetVx, steeringResponse, dt);
-  next.vy = damp(next.vy, targetVy, steeringResponse - 0.2, dt);
+  next.vy = damp(next.vy, targetVy, (diff === 'hard' ? 11.2 : 9.4), dt);
 
   // Advance world coordinates (flying toward -Z)
   next.x += next.vx * dt;
@@ -874,6 +1047,23 @@ export function stepFlightSimulation(
           next.boostCooldownTimer = Math.min(next.boostCooldownTimer, 0.35);
         }
 
+        // Track celebratory moment for Autoplay showmanship
+        next.recentCelebrationTimer = Math.max(next.recentCelebrationTimer, 1.15);
+
+        // STYLISH ROLL Bonus when barrel-rolling cleanly through a glowing Speed Gate!
+        if ((next.barrelRollTimer > 0 || next.barrelRollGraceTimer > 0) && !next.barrelRollBonusAwarded) {
+          const rollBonusScore = Math.round(350 * diffCfg.scoreRateMultiplier);
+          const rollBoostRefill = 0.14;
+          next.score += rollBonusScore;
+          next.boostCharge = Math.min(1, next.boostCharge + rollBoostRefill);
+          next.barrelRollBonusAwarded = true;
+          events.barrelRollBonus = {
+            kind: 'stylish',
+            bonusScore: rollBonusScore,
+            boostRefill: rollBoostRefill,
+          };
+        }
+
         events.gatePassed = {
           gateId: gate.id,
           multiplier,
@@ -899,6 +1089,20 @@ export function stepFlightSimulation(
           next.gateStreak = 0;
           events.gateMissed = true;
         }
+      }
+    }
+
+    // Track rocketing cleanly out from under a giant stone arch (triggers Autoplay showmanship!)
+    for (let i = 0; i < obstacles.length; i++) {
+      const obs = obstacles[i];
+      if (obs.kind !== 'arch') continue;
+      if (prev.z >= obs.z - 4 && next.z < obs.z - 4 && !next.passedArchIds.includes(obs.id)) {
+        const updatedArches =
+          next.passedArchIds.length > 14
+            ? [...next.passedArchIds.slice(-10), obs.id]
+            : [...next.passedArchIds, obs.id];
+        next.passedArchIds = updatedArches;
+        next.recentCelebrationTimer = Math.max(next.recentCelebrationTimer, 1.25);
       }
     }
   }
@@ -927,6 +1131,8 @@ export function stepFlightSimulation(
   }
 
   const worldTime = next.survivalSeconds;
+  const isRolling = next.barrelRollTimer > 0;
+  const inRollBonusWindow = next.barrelRollTimer > 0 || next.barrelRollGraceTimer > 0;
 
   // Title showcase and active Autoplay mode guarantee smooth, crash-free canyon carving
   if (titleAutopilot || gameplayAutoplay) {
@@ -964,7 +1170,7 @@ export function stepFlightSimulation(
     return { state: next, events };
   }
 
-  // --- Difficulty-Scaled Collision, Warning-Spark Scrape & Near-Miss Evaluation ---
+  // --- Difficulty-Scaled Collision, Mid-Roll Aerodynamic Deflection, Warning-Spark Scrape & Near-Miss ---
   const solidCoreRadius = diff === 'hard' ? 1.38 : diff === 'medium' ? 1.24 : 1.15;
   const grazeMargin = 2.15 * diffCfg.scrapeForgiveness;
   const directCrashDepth = 1.1 * diffCfg.scrapeForgiveness;
@@ -979,9 +1185,11 @@ export function stepFlightSimulation(
   const groundWingMax = Math.max(groundCenter, groundLeft, groundRight);
   const terrainPenetration = groundWingMax - next.y;
 
+  // While mid-roll, minor wingtip brushes against cliffs deflect in bright sparks; direct head-on slams still crash!
+  const effectiveTerrainCrashPen = isRolling ? Math.max(3.6, terrainCrashPen + 1.8) : terrainCrashPen;
   const isDirectTerrainCrash =
-    terrainPenetration > terrainCrashPen ||
-    (terrainPenetration > -0.15 && next.scrapeWarningTimer > 0 && next.scrapeCooldown <= 0);
+    terrainPenetration > effectiveTerrainCrashPen ||
+    (!isRolling && terrainPenetration > -0.15 && next.scrapeWarningTimer > 0 && next.scrapeCooldown <= 0);
 
   if (isDirectTerrainCrash) {
     next.crashed = true;
@@ -990,9 +1198,29 @@ export function stepFlightSimulation(
     return { state: next, events };
   }
 
-  // Slight brush against the sloping canyon ramp edge or valley floor -> warning spark + gentle push back
-  if (terrainPenetration > -1.35 * diffCfg.scrapeForgiveness) {
-    if (next.scrapeWarningTimer <= 0) {
+  // Slight brush against the sloping canyon ramp edge or valley floor
+  if (terrainPenetration > -1.35 * (isRolling ? 1.25 : diffCfg.scrapeForgiveness)) {
+    if (isRolling) {
+      // Mid-roll aerodynamic shimmer deflects glancing cliff/ramp brushes in bright sparks!
+      const pushDirX = next.x >= canyonCenterNow ? -1 : 1;
+      next.y = Math.max(next.y, groundWingMax + 1.8);
+      next.vy = Math.max(next.vy, 10.5);
+      next.x += pushDirX * 2.2;
+      next.vx = pushDirX * Math.max(22, Math.abs(next.vx) * 0.55);
+      events.barrelRollDeflect = true;
+      if (!next.barrelRollBonusAwarded) {
+        const rollBonusScore = Math.round(300 * diffCfg.scoreRateMultiplier);
+        const rollBoostRefill = 0.16;
+        next.score += rollBonusScore;
+        next.boostCharge = Math.min(1, next.boostCharge + rollBoostRefill);
+        next.barrelRollBonusAwarded = true;
+        events.barrelRollBonus = {
+          kind: 'evasive',
+          bonusScore: rollBonusScore,
+          boostRefill: rollBoostRefill,
+        };
+      }
+    } else if (next.scrapeWarningTimer <= 0) {
       const pushDirX = next.x >= canyonCenterNow ? -1 : 1;
       next.y = Math.max(next.y, groundWingMax + 1.15);
       next.vy = Math.max(next.vy, 7.5);
@@ -1025,30 +1253,49 @@ export function stepFlightSimulation(
       worldTime,
     );
 
-    // Direct solid core impact (much less forgiving on Hard!)
-    if (solidClearance <= -directCrashDepth || (solidClearance <= 0 && next.scrapeWarningTimer > 0)) {
+    // Direct head-on solid core impact still crashes even during barrel roll; glancing wingtip grazes deflect!
+    const effectiveCrashDepth = isRolling ? Math.max(2.35, directCrashDepth + 1.35) : directCrashDepth;
+    if (
+      solidClearance <= -effectiveCrashDepth ||
+      (!isRolling && solidClearance <= 0 && next.scrapeWarningTimer > 0)
+    ) {
       next.crashed = true;
       next.crashReason = 'obstacle';
       events.crashed = true;
       return { state: next, events };
     }
 
-    // Slight brush on obstacle edge -> warning spark + directional deflection
-    if (solidClearance <= grazeMargin * 0.55) {
+    // Slight brush on obstacle edge -> mid-roll shimmer deflect OR forgiving scrape warning
+    const deflectBand = isRolling ? Math.max(1.5, grazeMargin * 0.85) : grazeMargin * 0.55;
+    if (solidClearance <= deflectBand) {
       if (obs.kind === 'low-ridge') {
-        next.y = Math.max(next.y, obs.y + obs.height + 1.8);
+        next.y = Math.max(next.y, obs.y + obs.height + 2.0);
         next.vy = Math.max(next.vy, 14);
       } else if (obs.kind === 'overhang') {
-        next.y = Math.min(next.y, obs.y + obs.height - 1.8);
+        next.y = Math.min(next.y, obs.y + obs.height - 2.0);
         next.vy = Math.min(next.vy, -12);
       } else {
         const obsRefX = obs.kind === 'dust-devil' ? getDustDevilX(obs, worldTime) : obs.x;
         const deflectDir = next.x >= obsRefX ? 1 : -1;
-        next.x += deflectDir * 1.65;
-        next.vx = deflectDir * Math.max(20, Math.abs(next.vx) * 0.5);
+        next.x += deflectDir * (isRolling ? 2.4 : 1.65);
+        next.vx = deflectDir * Math.max(22, Math.abs(next.vx) * 0.55);
       }
 
-      if (next.scrapeCooldown <= 0) {
+      if (isRolling) {
+        events.barrelRollDeflect = true;
+        if (!next.barrelRollBonusAwarded) {
+          const rollBonusScore = Math.round(300 * diffCfg.scoreRateMultiplier);
+          const rollBoostRefill = 0.16;
+          next.score += rollBonusScore;
+          next.boostCharge = Math.min(1, next.boostCharge + rollBoostRefill);
+          next.barrelRollBonusAwarded = true;
+          events.barrelRollBonus = {
+            kind: 'evasive',
+            bonusScore: rollBonusScore,
+            boostRefill: rollBoostRefill,
+          };
+        }
+      } else if (next.scrapeCooldown <= 0) {
         next.scrapeCooldown = 0.45;
         next.scrapeWarningTimer = diffCfg.scrapeCooldownSec;
         events.scrape = { source: 'obstacle' };
@@ -1058,7 +1305,7 @@ export function stepFlightSimulation(
 
     // Exciting clean Near Miss skim!
     if (
-      solidClearance > grazeMargin * 0.55 &&
+      solidClearance > deflectBand &&
       solidClearance <= nearMissBand &&
       Math.abs(next.z - obs.z) < obs.thickness + 14 &&
       !next.triggeredObstacleIds.includes(obs.id)
@@ -1084,6 +1331,20 @@ export function stepFlightSimulation(
         machGain,
         source: obs.kind,
       };
+
+      // EVASIVE ROLL Bonus when barrel-rolling inches past a Martian rock or ruin!
+      if (inRollBonusWindow && !next.barrelRollBonusAwarded) {
+        const rollBonusScore = Math.round(300 * diffCfg.scoreRateMultiplier);
+        const rollBoostRefill = 0.16;
+        next.score += rollBonusScore;
+        next.boostCharge = Math.min(1, next.boostCharge + rollBoostRefill);
+        next.barrelRollBonusAwarded = true;
+        events.barrelRollBonus = {
+          kind: 'evasive',
+          bonusScore: rollBonusScore,
+          boostRefill: rollBoostRefill,
+        };
+      }
       break;
     }
   }
@@ -1110,6 +1371,19 @@ export function stepFlightSimulation(
       machGain,
       source: 'wall',
     };
+
+    if (inRollBonusWindow && !next.barrelRollBonusAwarded) {
+      const rollBonusScore = Math.round(300 * diffCfg.scoreRateMultiplier);
+      const rollBoostRefill = 0.16;
+      next.score += rollBonusScore;
+      next.boostCharge = Math.min(1, next.boostCharge + rollBoostRefill);
+      next.barrelRollBonusAwarded = true;
+      events.barrelRollBonus = {
+        kind: 'evasive',
+        bonusScore: rollBonusScore,
+        boostRefill: rollBoostRefill,
+      };
+    }
   }
 
   return { state: next, events };

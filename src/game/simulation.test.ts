@@ -14,6 +14,8 @@ import {
   isBreatherChunk,
 } from './terrainMath';
 import {
+  BARREL_ROLL_COOLDOWN_SEC,
+  BARREL_ROLL_DURATION_SEC,
   BOOST_OVERHEAT_RECOVERY_THRESHOLD,
   MAX_ALTITUDE,
   createInitialFlightState,
@@ -605,4 +607,210 @@ test('Elite Autoplay cleanly survives 60s Medium and 90s relentless Hard gauntle
   assert.ok(maxHardRoll > 0.2, 'Hard Autoplay should bank decisively through tight gauntlets');
   assert.ok(hardZones.size >= 3, `Hard Autoplay should blast through multiple Martian zones, visited ${[...hardZones].join(', ')}`);
 });
+
+test('Snap Barrel Roll executes a 360-degree spin with sharp lateral dodge and enforces 1.5s cooldown', () => {
+  let state = createInitialFlightState('easy');
+  const startX = state.x;
+
+  // Frame 0: trigger Snap Barrel Roll Right (+1)
+  const first = stepFlightSimulation(
+    state,
+    { steerX: 0, steerY: 0, boost: false, barrelRoll: 1 },
+    1 / 60,
+    { obstaclesOverride: [], gatesOverride: [] },
+  );
+  state = first.state;
+  assert.equal(first.events.barrelRollStarted, 1, 'Barrel roll right should start immediately');
+  assert.ok(state.barrelRollTimer > 0, 'Barrel roll timer should be active');
+  assert.ok(
+    state.barrelRollCooldown >= BARREL_ROLL_COOLDOWN_SEC - 0.05,
+    'Cooldown should be set to ~1.5 seconds',
+  );
+
+  let maxAbsSpinAngle = 0;
+  let sawSpinMidpoint = false;
+  let blockedDuringCooldown = true;
+
+  // Advance through the 0.44s spin and partway into cooldown
+  for (let i = 0; i < 60; i++) {
+    const res = stepFlightSimulation(
+      state,
+      { steerX: 0, steerY: 0, boost: false, barrelRoll: i === 15 || i === 45 ? -1 : 0 },
+      1 / 60,
+      { obstaclesOverride: [], gatesOverride: [] },
+    );
+    state = res.state;
+    if (res.events.barrelRollStarted !== null) {
+      blockedDuringCooldown = false;
+    }
+    const absAngle = Math.abs(state.barrelRollAngle);
+    if (absAngle > maxAbsSpinAngle) maxAbsSpinAngle = absAngle;
+    if (absAngle > Math.PI * 0.7 && absAngle < Math.PI * 1.3) {
+      sawSpinMidpoint = true;
+    }
+  }
+
+  assert.equal(blockedDuringCooldown, true, 'Must not allow another barrel roll during 1.5s cooldown');
+  assert.equal(sawSpinMidpoint, true, 'Craft must pass smoothly through inverted midpoint of 360-degree spin');
+  assert.ok(maxAbsSpinAngle > Math.PI * 1.85, `Expected full ~2*PI spin, got ${maxAbsSpinAngle.toFixed(2)} rad`);
+  assert.equal(state.barrelRollTimer, 0, 'Spin should complete cleanly within BARREL_ROLL_DURATION_SEC');
+  assert.equal(state.barrelRollAngle, 0, 'Spin angle should reset to 0 after completing 360 degrees');
+  assert.ok(
+    state.x - startX > 12,
+    `Snap Barrel Roll right should deliver a sharp lateral dodge > 12m, got ${(state.x - startX).toFixed(1)}m`,
+  );
+
+  // Wait remaining cooldown (> 1.5s total) and confirm roll fires cleanly again
+  for (let i = 0; i < 40; i++) {
+    state = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [],
+    }).state;
+  }
+  assert.equal(state.barrelRollCooldown, 0, 'Cooldown should reach 0 after 1.5 seconds');
+
+  const second = stepFlightSimulation(
+    state,
+    { steerX: 0, steerY: 0, boost: false, barrelRoll: -1 },
+    1 / 60,
+    { obstaclesOverride: [], gatesOverride: [] },
+  );
+  assert.equal(second.events.barrelRollStarted, -1, 'Second barrel roll should fire cleanly once cooldown expires');
+  assert.ok(BARREL_ROLL_DURATION_SEC > 0.3 && BARREL_ROLL_DURATION_SEC < 0.6);
+});
+
+test('mid-roll glancing scrape deflects cleanly with EVASIVE ROLL bonus while direct solid head-on hit still crashes', () => {
+  // 1. Mid-roll glancing brush on spire edge -> deflects safely & awards EVASIVE ROLL + Boost top-up
+  let glanceState = createInitialFlightState('easy');
+  glanceState.x = 0;
+  glanceState.y = 20;
+  glanceState.z = -100;
+  glanceState.boostCharge = 0.5;
+  glanceState.barrelRollTimer = 0.25;
+  glanceState.barrelRollDir = -1;
+
+  const glanceSpire: CanyonObstacle = {
+    id: 'roll-glance-spire',
+    kind: 'spire',
+    x: 6.4,
+    y: 0,
+    z: -102,
+    radius: 8,
+    height: 60,
+    thickness: 8,
+    yaw: 0,
+    tint: 0.5,
+  };
+
+  const glanceRes = stepFlightSimulation(
+    glanceState,
+    { steerX: 0, steerY: 0, boost: false },
+    1 / 60,
+    { obstaclesOverride: [glanceSpire], gatesOverride: [] },
+  );
+  assert.equal(glanceRes.state.crashed, false, 'Mid-roll glancing brush must deflect safely instead of crashing');
+  assert.equal(glanceRes.events.barrelRollDeflect, true, 'Mid-roll graze should emit barrelRollDeflect');
+  assert.equal(glanceRes.events.barrelRollBonus?.kind, 'evasive', 'Mid-roll deflection should trigger EVASIVE ROLL bonus');
+  assert.ok(glanceRes.state.boostCharge > 0.6, 'EVASIVE ROLL should top up Boost Bar energy');
+
+  // 2. Direct solid head-on collision straight into spire core during a roll STILL crashes!
+  let directState = createInitialFlightState('easy');
+  directState.x = 0;
+  directState.y = 20;
+  directState.z = -100;
+  directState.barrelRollTimer = 0.25;
+  directState.barrelRollDir = 1;
+
+  const deadCenterSpire: CanyonObstacle = {
+    id: 'roll-direct-spire',
+    kind: 'spire',
+    x: 0.2,
+    y: 0,
+    z: -102,
+    radius: 10,
+    height: 60,
+    thickness: 10,
+    yaw: 0,
+    tint: 0.5,
+  };
+
+  const directRes = stepFlightSimulation(
+    directState,
+    { steerX: 0, steerY: 0, boost: false },
+    1 / 60,
+    { obstaclesOverride: [deadCenterSpire], gatesOverride: [] },
+  );
+  assert.equal(directRes.state.crashed, true, 'Direct solid head-on collision must still crash even while rolling');
+});
+
+test('rolling cleanly through a Speed Gate awards STYLISH ROLL bonus and extra Boost Bar energy', () => {
+  let state = createInitialFlightState('easy');
+  state.x = 0;
+  state.y = 22;
+  state.z = -50;
+  state.boostCharge = 0.25;
+  state.barrelRollTimer = 0.28;
+  state.barrelRollDir = 1;
+
+  const gate = { id: 'stylish-gate', x: 0, y: 22, z: -52.5, radius: 13, tier: 'flow' as const, yaw: 0 };
+  let sawStylish = false;
+  let sawGate = false;
+
+  for (let i = 0; i < 15; i++) {
+    const res = stepFlightSimulation(state, { steerX: 0, steerY: 0, boost: false }, 1 / 60, {
+      obstaclesOverride: [],
+      gatesOverride: [gate],
+    });
+    state = res.state;
+    if (res.events.gatePassed) sawGate = true;
+    if (res.events.barrelRollBonus?.kind === 'stylish') {
+      sawStylish = true;
+      break;
+    }
+  }
+
+  assert.equal(sawGate, true, 'Craft should pass through the Speed Gate');
+  assert.equal(sawStylish, true, 'Rolling through a Speed Gate should trigger STYLISH ROLL bonus');
+  assert.ok(state.boostCharge >= 0.65, `Gate + Stylish Roll should top up Boost Bar generously, got ${state.boostCharge.toFixed(2)}`);
+});
+
+test('Ace Autoplay triggers safe Snap Barrel Rolls obeying 1.5s cooldown across Easy and Hard with 0 crashes', () => {
+  for (const diff of ['easy', 'hard'] as const) {
+    let state = createInitialFlightState(diff);
+    let rollCount = 0;
+    let lastRollTime = -10;
+    let minGap = Infinity;
+
+    // 75 seconds at 60Hz = 4500 frames
+    for (let i = 0; i < 4500; i++) {
+      const res = stepFlightSimulation(
+        state,
+        { steerX: 0, steerY: 0, boost: false },
+        1 / 60,
+        { gameplayAutoplay: true },
+      );
+      state = res.state;
+      if (res.events.barrelRollStarted !== null) {
+        rollCount++;
+        const gap = state.survivalSeconds - lastRollTime;
+        if (lastRollTime >= 0) {
+          minGap = Math.min(minGap, gap);
+        }
+        lastRollTime = state.survivalSeconds;
+      }
+      assert.equal(
+        state.crashed,
+        false,
+        `${diff} Autoplay crashed while using barrel rolls at frame ${i} (z=${state.z.toFixed(1)})`,
+      );
+    }
+
+    assert.ok(rollCount >= 3, `Expected ${diff} Autoplay to perform >= 3 Snap Barrel Rolls in 75s, got ${rollCount}`);
+    assert.ok(
+      minGap >= BARREL_ROLL_COOLDOWN_SEC - 0.05,
+      `Autoplay must obey exact ${BARREL_ROLL_COOLDOWN_SEC}s barrel roll cooldown, saw gap=${minGap.toFixed(2)}s`,
+    );
+  }
+});
+
 
